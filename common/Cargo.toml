@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Serialization and Error handling (Keep these from before)
+# Serialization and Error handling
 serde = { version = "1.0", features = ["derive"] }
 byteorder = "1.5"
 thiserror = "1.0"
 
 # gRPC Runtime Dependencies
-tonic = "0.12"           # The gRPC implementation
-prost = "0.13"           # Protocol Buffers implementation
+tonic = "0.12"
+prost = "0.13"
 
 [build-dependencies]
-tonic-build = "0.12"     # Compiles .proto files into Rust during build time
-protobuf-src = "1.1"     # Protocol Buffer Compiler
+tonic-build = "0.12"
+protobuf-src = "1.1"

@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package slave_api;
+
+enum DeviceState {
+  INIT = 0;
+  DISCOVERY_SYNC = 1;
+  PRE_OP = 2;
+  SAFE_OP = 3;
+  OP = 4;
+  ERROR = 5;
+  SHUTDOWN = 6;
+}
+
+enum StatusCode {
+  NO_ERROR = 0;
+  ERR_PTP_SYNC_LOST = 1;
+  ERR_CYCLE_COUNTER = 2;
+  ERR_DEADLINE_MISSED = 3;
+  ERR_STREAM_ID_UNKNOWN = 4;
+  ERR_INVALID_LEN = 5;
+  ERR_APP_NOT_RESPONDING = 6;
+  ERR_PERIPHERAL_FAULT = 7;
+  ERR_NOT_READY = 8;
+  ERR_ACCESS_DENIED = 9;
+  ERR_AUTH_FAILED = 10;
+  ERR_STATE_CONFLICT = 11;
+  ERR_PARAM_INVALID = 12;
+  ERR_NO_MEMORY = 13;
+  ERR_VERSION_MISMATCH = 14;
+  ERR_NOT_SUPPORTED = 16;
+  ERR_ALREADY_RUNNING = 17;
+  ERR_OS_FAILURE = 18;
+  ERR_IP_CONFLICT = 19;
+}
+
+enum SyncStatus {
+  SYNCED = 0; // Error < 1 µs
+  SYNCING = 1; // Unstable
+  SYNC_LOST = 2; // > Threshold
+}
+
+enum DataType {
+  BOOL = 0; // 1 bit
+  INT8 = 1; // 1 byte
+  UINT8 = 2; // 1 byte
+  INT16 = 3; // 2 bytes
+  UINT16 = 4; // 2 bytes
+  INT32 = 5; // 4 bytes
+  UINT32 = 6; // 4 bytes
+  INT64 = 7; // 8 bytes
+  UINT64 = 8; // 8 bytes
+  FLOAT32 = 9; // 4 bytes (IEEE 754)
+  FLOAT64 = 10; // 8 bytes (IEEE 754)
+  ARRAY = 11; // Variable length
+}
+
+enum VariableDirection {
+  INPUT = 0; // Master -> Actuator
+  OUTPUT = 1; // Sensor -> Master
+}
+
+message DeviceInfo {
+  bytes mac_address = 1;
+  bytes ip_address = 2;
+  bytes netmask = 3;
+  bytes gateway = 4;
+  uint32 vendor_id = 5;
+  uint32 device_id = 6;
+  uint32 serial_number = 7;
+  uint32 capabilities = 8;
+}
+
+message DeviceStatus {
+  StatusCode status_code = 1;
+  DeviceState state = 2;
+  SyncStatus sync_status = 3;
+  uint32 missed_cycles = 4;
+  uint32 min_cycle_time_ns = 5;
+  uint32 max_cycle_time_ns = 6;
+  sint32 temperature = 7;
+  uint64 timestamp = 8;
+}
+
+message ProcessVariable {
+  string name = 1;
+  DataType data_type = 2;
+  VariableDirection direction = 3;
+  uint32 byte_offset = 4;
+  uint32 bit_offset = 5;
+  uint32 bit_len = 6;
+}
+
+message Empty {}
+
+message SetTargetStateRequest {
+  DeviceState target_state = 1;
+}
+
+message StatusResponse {
+  StatusCode code = 1;
+}
+
+message SubscribeStatusRequest {
+  int32 temperature_threshold = 1;
+  uint32 min_interval_ms = 2;
+}
+
+message GetLogRequest {
+  uint32 number_of_entries = 1;
+}
+
+message GetLogResponse {
+  repeated DeviceStatus entries = 1;
+}
+
+message ProcessDataLayoutResponse {
+  repeated ProcessVariable variables = 1;
+}
+
+message GetTokenRequest {
+  uint32 shared_key_part = 1;
+}
+
+message GetTokenResponse {
+  string token = 1;
+  StatusCode status = 2;
+}
+
+service FieldbusDevice {
+  // Management
+  rpc SetTargetState(SetTargetStateRequest) returns (StatusResponse);
+  rpc GetStatus(Empty) returns (DeviceStatus);
+  rpc SubscribeToStatus(SubscribeStatusRequest) returns (stream DeviceStatus);
+  rpc GetDeviceStatusLog(GetLogRequest) returns (GetLogResponse);
+  rpc GetDeviceInfo(Empty) returns (DeviceInfo);
+  
+  // Configuration
+  rpc GetProcessDataLayout(Empty) returns (ProcessDataLayoutResponse);
+
+  // Security
+  rpc GetToken(GetTokenRequest) returns (GetTokenResponse);
+  rpc ResetSequenceNumber(Empty) returns (StatusResponse);
+}
