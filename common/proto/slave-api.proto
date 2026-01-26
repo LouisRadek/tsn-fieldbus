@@ -76,7 +76,8 @@ message DeviceInfo {
   uint32 vendor_id = 5;
   uint32 device_id = 6;
   uint32 serial_number = 7;
-  uint32 capabilities = 8;
+  uint32 firmware_version = 8;
+  uint32 capabilities = 9;
 }
 
 message DeviceStatus {
