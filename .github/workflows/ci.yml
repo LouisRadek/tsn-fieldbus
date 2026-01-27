@@ -89,6 +89,9 @@ jobs:
       - name: Build documentation
         run: cargo doc --release --no-deps
 
+      - name: Fix rustdoc index
+        run: echo '<meta http-equiv="refresh" content="0;url=common/index.html">' > target/doc/index.html
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:
