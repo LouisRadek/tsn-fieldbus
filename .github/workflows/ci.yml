@@ -90,7 +90,7 @@ jobs:
         run: cargo doc --release --no-deps
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v2
+        uses: actions/upload-pages-artifact@v4
         with:
           path: target/doc
 
