@@ -146,11 +146,10 @@ message GetTokenResponse {
 /**
   * SlaveAPI provides management, configuration, and security operations for the fieldbus slave devices.
   * It allows clients to control device state, monitor status, retrieve logs, process data, and manage authentication.
-  * Endpoint with the "Secured." in the documentation are secured through token based authentication.
+  * All API endpoints, expect get_token(), are secured through a token based authentication.
 */
 service SlaveAPI {
   /**
-    * Secured.
     * Try to set the state of the device according to the state machine.
     * Input: Target state.
     * Output: Status Code, i.e. if the operation was successful or if the state transition was prohibited or there was another error.
@@ -165,7 +164,6 @@ service SlaveAPI {
   rpc GetStatus(Empty) returns (DeviceStatus);
 
   /**
-    * Secured.
     * Subscribe to the DeviceStatus information, i.e. if the DeviceStatus changes, it gets published to the subscribers.
     * Excluded from the DeviceStatus change publish are the fields min_cycle_time, max_cycle_time, timestamp, because they change to frequently.
     * The temperature field is acknowledged only after exceeding a threshold.
@@ -213,7 +211,6 @@ service SlaveAPI {
   rpc GetToken(GetTokenRequest) returns (GetTokenResponse);
 
   /**
-    * Secured.
     * Reset the sequence number used for the generation of tags in the Hash-based Message Authentication Code (HMAC) 
   */
   rpc ResetSequenceNumber(Empty) returns (StatusResponse);
