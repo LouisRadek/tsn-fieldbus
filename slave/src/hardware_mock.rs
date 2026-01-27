@@ -1,21 +1,25 @@
 #![allow(dead_code)]
 //! Hardware Mock
 //!
-//! This is a mock for the hardware implementation by an manufacturer.
-//! It implements an process image with simulated data and the ProcessImageAccess trait to access the data.
+//! This is a mock for the hardware implementation by a manufacturer.
+//! It implements a process image with simulated data and implements both
+//! the `ProcessImageAccess` and `DeviceInfoAccess` traits to provide access
+//! to process variables and device information respectively.
 
-use common::slave_api::{DataType, ProcessVariable, VariableDirection};
+use common::slave_api::{DataType, DeviceInfo, ProcessVariable, VariableDirection};
 use std::sync::{Arc, RwLock};
 
-use crate::process_image_access::ProcessImageAccess;
+use crate::hardware_abstraction::{DeviceInfoAccess, ProcessImageAccess};
 
 /// Mock thread-safe hardware implementation for testing.
 /// Simulates:
 /// - 1 Input: Temperature Sensor (INT16, Offset 0)
 /// - 1 Output: Status LED (BOOL, Offset 2, Bit 0)
+/// - Device Information: MAC address, IP address, vendor ID, device ID, and serial number, firmware version, capabilities
 pub struct DummyHardware {
     input_image: Arc<RwLock<Vec<u8>>>,
     output_image: Arc<RwLock<Vec<u8>>>,
+    device_info: Arc<RwLock<DeviceInfo>>,
 }
 
 impl DummyHardware {
@@ -24,10 +28,23 @@ impl DummyHardware {
     /// Initialize memory with zeros.
     /// Input: 2 bytes (INT16).
     /// Output: 1 byte (BOOL).
+    ///
+    /// Device Info: Initialize with dummy data
     pub fn new() -> Self {
         Self {
             input_image: Arc::new(RwLock::new(vec![0; 2])),
             output_image: Arc::new(RwLock::new(vec![0; 1])),
+            device_info: Arc::new(RwLock::new(DeviceInfo {
+                mac_address: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+                ip_address: vec![0, 0, 0, 0],
+                netmask: vec![255, 255, 255, 0],
+                gateway: vec![0, 0, 0, 0],
+                vendor_id: 42,
+                device_id: 42,
+                serial_number: 0x12345678,
+                firmware_version: 1,
+                capabilities: 0,
+            })),
         }
     }
 
@@ -45,6 +62,27 @@ impl DummyHardware {
             (lock[0] & 0x01) != 0
         } else {
             false
+        }
+    }
+}
+
+impl DeviceInfoAccess for DummyHardware {
+    fn read_device_info(&self) -> DeviceInfo {
+        if let Ok(lock) = self.device_info.read() {
+            lock.clone()
+        } else {
+            // Fallback to default values if read fails
+            DeviceInfo {
+                mac_address: vec![0, 0, 0, 0, 0, 0],
+                ip_address: vec![0, 0, 0, 0],
+                netmask: vec![255, 255, 255, 0],
+                gateway: vec![0, 0, 0, 0],
+                vendor_id: 0,
+                device_id: 0,
+                serial_number: 0,
+                firmware_version: 0,
+                capabilities: 0,
+            }
         }
     }
 }
@@ -263,5 +301,38 @@ mod tests {
 
         assert_eq!(inputs[0], 0x01);
         assert!(hw.get_led_status());
+    }
+
+    #[test]
+    fn test_device_info_initialization() {
+        let hw = DummyHardware::new();
+        let info = hw.read_device_info();
+
+        assert_eq!(info.vendor_id, 42);
+        assert_eq!(info.device_id, 42);
+        assert_eq!(info.serial_number, 0x12345678);
+        assert_eq!(info.mac_address, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        assert_eq!(info.firmware_version, 1);
+        assert_eq!(info.capabilities, 0);
+    }
+
+    #[test]
+    fn test_concurrent_device_info_reads() {
+        let hw = Arc::new(DummyHardware::new());
+        let mut handles = vec![];
+
+        for _ in 0..5 {
+            let hw_clone = Arc::clone(&hw);
+            let handle = thread::spawn(move || {
+                let info = hw_clone.read_device_info();
+                assert_eq!(info.serial_number, 0x12345678);
+                assert_eq!(info.mac_address, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 }
