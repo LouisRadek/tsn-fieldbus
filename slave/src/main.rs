@@ -3,10 +3,14 @@ use std::{sync::Arc, thread, time::Duration};
 use common::slave_api::DeviceState;
 use log::info;
 
-use crate::{hardware_mock::DummyHardware, process_image_access::ProcessImageAccess, state_machine::DeviceStateManager};
+use crate::{
+    hardware_abstraction::ProcessImageAccess, hardware_mock::DummyHardware,
+    state_machine::DeviceStateManager,
+};
 
+mod discovery;
+mod hardware_abstraction;
 mod hardware_mock;
-mod process_image_access;
 mod state_machine;
 
 fn main() {
@@ -14,12 +18,17 @@ fn main() {
     info!("Starting TSN Fieldbus Slave...");
 
     let hardware = Arc::new(DummyHardware::new());
-    info!("Hardware initialized with layout: {:?}", hardware.get_layout());
+    info!(
+        "Hardware initialized with layout: {:?}",
+        hardware.get_layout()
+    );
 
     let state_manager = DeviceStateManager::new();
-    
+
     thread::sleep(Duration::from_secs(1));
-    state_manager.set_target_state(DeviceState::DiscoverySync).unwrap();
+    state_manager
+        .set_target_state(DeviceState::DiscoverySync)
+        .unwrap();
     info!("Current State: {:?}", state_manager.get_state());
 
     thread::sleep(Duration::from_secs(1));
@@ -47,6 +56,9 @@ fn main() {
     loop {
         thread::sleep(Duration::from_secs(1));
         let inputs = hardware.read_inputs();
-        info!("Current Temperatur: {:?}", i16::from_be_bytes([inputs[0], inputs[1]]));
+        info!(
+            "Current Temperatur: {:?}",
+            i16::from_be_bytes([inputs[0], inputs[1]])
+        );
     }
 }
