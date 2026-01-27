@@ -1,17 +1,67 @@
 #![allow(dead_code)]
+//! SDCP (Service Discovery Control Protocol) Types and Message Handling
+//!
+//! This module provides types and utilities for working with the SDCP protocol,
+//! which is used for device discovery and IP configuration in TSN fieldbus networks.
+//!
+//! # Overview
+//!
+//! The SDCP protocol operates at the Ethernet layer (EtherType 0x88B5) and supports:
+//! - Device discovery via broadcast
+//! - IP address configuration (manual, DHCP, or SDCP-assigned)
+//! - Device status reporting
+//! - IP configuration reporting
+//!
+//! # Protocol Structure
+//!
+//! SDCP messages consist of:
+//! 1. **SDCP Header** - Contains version, operation code, transaction ID, and flags
+//! 2. **TLV Payloads** - Type-Length-Value encoded data for specific information
+//!
+//! # Example
+//!
+//! ```no_run
+//! use common::discovery_types::{SdcpHeader, SdcpOpCode, Tlv};
+//!
+//! // Create a discovery request header
+//! let header = SdcpHeader::new(SdcpOpCode::DiscoverReq, 1);
+//!
+//! // Create device info TLV
+//! let tlv = Tlv::device_info(0x1234, 0x5678, 0xDEADBEEF);
+//!
+//! // Serialize to bytes
+//! let mut buffer = Vec::new();
+//! header.write_to(&mut buffer).unwrap();
+//! tlv.write_to(&mut buffer).unwrap();
+//! ```
+
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Cursor, Read};
 
 use crate::status_codes::StatusCode;
 
+/// EtherType value for SDCP protocol frames
 pub const ETHERTYPE_SDCP: u16 = 0x88B5;
+/// SDCP protocol version (currently 0x01)
 pub const SDCP_VERSION: u8 = 0x01;
+/// Default flags for SDCP headers
 pub const SDCP_FLAGS: u8 = 0x00;
+/// TLV type identifier for device information
 pub const TLV_TYPE_DEVICE_INFO: u8 = 0x01;
+/// TLV type identifier for IP configuration
 pub const TLV_TYPE_IP_CONFIG: u8 = 0x02;
+/// TLV type identifier for status reports
 pub const TLV_TYPE_STATUS_REPORT: u8 = 0x03;
+/// TLV type identifier for IP reports
 pub const TLV_TYPE_IP_REPORT: u8 = 0x04;
 
+/// SDCP operation codes specifying the type of message
+///
+/// This enum represents all possible SDCP message types:
+/// - `DiscoverReq/Res`: Device discovery protocol
+/// - `SetIpReq/Res`: Configure IP settings via SDCP
+/// - `GetIpReq/Res`: Query current IP settings
+/// - `ActivateDhcpReq/Res`: Enable DHCP on device
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SdcpOpCode {
@@ -42,6 +92,18 @@ impl From<u8> for SdcpOpCode {
     }
 }
 
+/// SDCP message header
+///
+/// Contains protocol metadata: version, operation code, transaction ID, and flags.
+/// This is a 5-byte fixed-size header that appears at the start of all SDCP messages.
+///
+/// # Memory Layout (C struct)
+/// ```text
+/// Byte 0: Version
+/// Byte 1: Operation Code
+/// Bytes 2-3: Transaction ID (big-endian)
+/// Byte 4: Flags
+/// ```
 #[repr(C, packed)]
 #[derive(Debug)]
 pub struct SdcpHeader {
@@ -52,6 +114,11 @@ pub struct SdcpHeader {
 }
 
 impl SdcpHeader {
+    /// Create a new SDCP header with the specified operation code and transaction ID
+    ///
+    /// # Arguments
+    /// * `op_code` - The operation to perform
+    /// * `transaction_id` - Unique identifier for correlating requests and responses
     pub fn new(op_code: SdcpOpCode, transaction_id: u16) -> Self {
         Self {
             version: SDCP_VERSION,
@@ -61,6 +128,10 @@ impl SdcpHeader {
         }
     }
 
+    /// Serialize this header to a byte buffer in big-endian format
+    ///
+    /// # Errors
+    /// Returns `io::Error` if writing to the buffer fails
     pub fn write_to(&self, buf: &mut Vec<u8>) -> io::Result<()> {
         buf.write_u8(self.version)?;
         buf.write_u8(self.op_code as u8)?;
@@ -69,6 +140,13 @@ impl SdcpHeader {
         Ok(())
     }
 
+    /// Deserialize a header from a byte buffer in big-endian format
+    ///
+    /// # Arguments
+    /// * `buf` - Buffer containing at least 5 bytes of header data
+    ///
+    /// # Errors
+    /// Returns `io::Error` if the buffer is too small or reading fails
     pub fn read_from(buf: &[u8]) -> io::Result<Self> {
         let mut reader = Cursor::new(buf);
         let version = reader.read_u8()?;
@@ -101,6 +179,9 @@ impl SdcpHeader {
     }
 }
 
+/// Source of IP address assignment
+///
+/// Indicates how a device obtained its IP address configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IpSource {
@@ -121,6 +202,9 @@ impl From<u8> for IpSource {
     }
 }
 
+/// Device identification information
+///
+/// Contains basic identification data about an SDCP device
 #[derive(Debug)]
 pub struct DeviceInfo {
     pub vendor_id: u16,
@@ -128,6 +212,9 @@ pub struct DeviceInfo {
     pub serial_number: u32,
 }
 
+/// IP network configuration parameters
+///
+/// Specifies the IP address, subnet mask, and default gateway for a device
 #[derive(Debug)]
 pub struct IpConfig {
     pub ip: [u8; 4],
@@ -135,11 +222,17 @@ pub struct IpConfig {
     pub gateway: [u8; 4],
 }
 
+/// Device status information
+///
+/// Reports the current operational status of a device
 #[derive(Debug)]
 pub struct StatusReport {
     pub status_code: u8,
 }
 
+/// Current IP configuration of a device including its source
+///
+/// Reports the device's current IP settings and how they were assigned
 #[derive(Debug)]
 pub struct IpReport {
     pub ip: [u8; 4],
@@ -148,6 +241,15 @@ pub struct IpReport {
     pub ip_source: IpSource,
 }
 
+/// Type-Length-Value (TLV) encoded data structure
+///
+/// A generic container for SDCP message payloads. TLV encoding allows flexible,
+/// extensible message formats where each field is self-describing.
+///
+/// # Structure
+/// - **Type** (1 byte): Identifies the kind of data (see TLV_TYPE_* constants)
+/// - **Length** (1 byte): Size of the value in bytes
+/// - **Value** (variable): The actual data payload
 #[derive(Debug)]
 pub struct Tlv {
     t_type: u8,
@@ -156,6 +258,13 @@ pub struct Tlv {
 }
 
 impl Tlv {
+    /// Create a new TLV with the specified type and value data
+    ///
+    /// # Arguments
+    /// * `t_type` - TLV type identifier
+    /// * `value` - The payload bytes
+    ///
+    /// The length is automatically calculated from the value size
     pub fn new(t_type: u8, value: Vec<u8>) -> Self {
         Self {
             t_type,
@@ -168,6 +277,12 @@ impl Tlv {
         self.t_type
     }
 
+    /// Create a device info TLV
+    ///
+    /// # Arguments
+    /// * `vendor_id` - Vendor/manufacturer identifier
+    /// * `device_id` - Device model identifier
+    /// * `serial_number` - Unique device serial number
     pub fn device_info(vendor_id: u16, device_id: u16, serial_number: u32) -> Self {
         let mut value = Vec::with_capacity(8);
         value.extend_from_slice(&vendor_id.to_be_bytes());
@@ -176,6 +291,12 @@ impl Tlv {
         Tlv::new(TLV_TYPE_DEVICE_INFO, value)
     }
 
+    /// Create an IP configuration TLV
+    ///
+    /// # Arguments
+    /// * `ip` - IPv4 address as 4-byte array
+    /// * `netmask` - Subnet mask as 4-byte array
+    /// * `gateway` - Default gateway address as 4-byte array
     pub fn ip_config(ip: [u8; 4], netmask: [u8; 4], gateway: [u8; 4]) -> Self {
         let mut value = Vec::with_capacity(12);
         value.extend_from_slice(&ip);
@@ -184,10 +305,21 @@ impl Tlv {
         Tlv::new(TLV_TYPE_IP_CONFIG, value)
     }
 
+    /// Create a status report TLV
+    ///
+    /// # Arguments
+    /// * `status_code` - The device status code
     pub fn status_report(status_code: u8) -> Self {
         Tlv::new(TLV_TYPE_STATUS_REPORT, vec![status_code])
     }
 
+    /// Create an IP report TLV (current IP configuration with source)
+    ///
+    /// # Arguments
+    /// * `ip` - IPv4 address as 4-byte array
+    /// * `netmask` - Subnet mask as 4-byte array
+    /// * `gateway` - Default gateway address as 4-byte array
+    /// * `ip_source` - How the IP address was assigned
     pub fn ip_report(ip: [u8; 4], netmask: [u8; 4], gateway: [u8; 4], ip_source: IpSource) -> Self {
         let mut value = Vec::with_capacity(13);
         value.extend_from_slice(&ip);
@@ -197,6 +329,10 @@ impl Tlv {
         Tlv::new(TLV_TYPE_IP_REPORT, value)
     }
 
+    /// Serialize this TLV to bytes in the format: [Type][Length][Value...]
+    ///
+    /// # Errors
+    /// Returns `io::Error` if writing to the buffer fails
     pub fn write_to(&self, buf: &mut Vec<u8>) -> io::Result<()> {
         buf.write_u8(self.t_type)?;
         buf.write_u8(self.length)?;
@@ -204,6 +340,13 @@ impl Tlv {
         Ok(())
     }
 
+    /// Deserialize a TLV from bytes
+    ///
+    /// # Arguments
+    /// * `buf` - Buffer containing at least 2 + length bytes
+    ///
+    /// # Errors
+    /// Returns `io::Error` if the buffer is too small or reading fails
     pub fn read_from(buf: &[u8]) -> io::Result<Self> {
         let mut reader = Cursor::new(buf);
         let t_type = reader.read_u8()?;
@@ -217,6 +360,9 @@ impl Tlv {
         })
     }
 
+    /// Parse device info from this TLV
+    ///
+    /// Returns `None` if this TLV is not a device info type or has invalid size
     pub fn parse_device_info(&self) -> Option<DeviceInfo> {
         if self.t_type != TLV_TYPE_DEVICE_INFO || self.value.len() != 8 {
             return None;
@@ -232,6 +378,9 @@ impl Tlv {
         })
     }
 
+    /// Parse IP configuration from this TLV
+    ///
+    /// Returns `None` if this TLV is not an IP config type or has invalid size
     pub fn parse_ip_config(&self) -> Option<IpConfig> {
         if self.t_type != TLV_TYPE_IP_CONFIG || self.value.len() != 12 {
             return None;
@@ -249,6 +398,9 @@ impl Tlv {
         })
     }
 
+    /// Parse status report from this TLV
+    ///
+    /// Returns `None` if this TLV is not a status report type or has invalid size
     pub fn parse_status_report(&self) -> Option<StatusCode> {
         if self.t_type != TLV_TYPE_STATUS_REPORT || self.value.len() != 1 {
             return None;
@@ -257,6 +409,9 @@ impl Tlv {
         Some(StatusCode::from(status_code))
     }
 
+    /// Parse IP report from this TLV
+    ///
+    /// Returns `None` if this TLV is not an IP report type or has invalid size
     pub fn parse_ip_report(&self) -> Option<IpReport> {
         if self.t_type != TLV_TYPE_IP_REPORT || self.value.len() != 13 {
             return None;
