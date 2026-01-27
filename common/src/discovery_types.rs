@@ -6,7 +6,7 @@
 //!
 //! # Overview
 //!
-//! The SDCP protocol operates at the Ethernet layer (EtherType 0x88B5) and supports:
+//! The SDCP protocol operates at the Ethernet layer and supports:
 //! - Device discovery via broadcast
 //! - IP address configuration (manual, DHCP, or SDCP-assigned)
 //! - Device status reporting
