@@ -1,7 +1,8 @@
+#![allow(dead_code)]
 use common::slave_api::ProcessVariable;
 
 /// Trait abstracting the hardware acess.
-/// 
+///
 /// The manufacturer must implement that the hardware stores its data in a process image which is a block of RAM.
 /// Then the manufacturer has to implement this trait, i.e. the access to the process image, and has to model the data stored in the process image via ProcessVariables.
 pub trait ProcessImageAccess: Send + Sync {

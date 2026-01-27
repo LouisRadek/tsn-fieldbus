@@ -143,75 +143,57 @@ message GetTokenResponse {
   StatusCode status = 2;
 }
 
-/**
-  * SlaveAPI provides management, configuration, and security operations for the fieldbus slave devices.
-  * It allows clients to control device state, monitor status, retrieve logs, process data, and manage authentication.
-  * All API endpoints, expect get_token(), are secured through a token based authentication.
-*/
+/// SlaveAPI provides management, configuration, and security operations for the fieldbus slave devices.
+/// It allows clients to control device state, monitor status, retrieve logs, process data, and manage authentication.
+/// All API endpoints, expect get_token(), are secured through a token based authentication.
 service SlaveAPI {
-  /**
-    * Try to set the state of the device according to the state machine.
-    * Input: Target state.
-    * Output: Status Code, i.e. if the operation was successful or if the state transition was prohibited or there was another error.
-  */
+  /// Try to set the state of the device according to the state machine.
+  /// Input: Target state.
+  /// Output: Status Code, i.e. if the operation was successful or if the state transition was prohibited or there was another error.
   rpc SetTargetState(SetTargetStateRequest) returns (StatusResponse);
   
-  /**
-    * Get DeviceStatus information.
-    * Input: None.
-    * Output: DeviceStatus information.
-  */
+  /// Get DeviceStatus information.
+  /// Input: None.
+  /// Output: DeviceStatus information.
   rpc GetStatus(Empty) returns (DeviceStatus);
 
-  /**
-    * Subscribe to the DeviceStatus information, i.e. if the DeviceStatus changes, it gets published to the subscribers.
-    * Excluded from the DeviceStatus change publish are the fields min_cycle_time, max_cycle_time, timestamp, because they change to frequently.
-    * The temperature field is acknowledged only after exceeding a threshold.
-    * Input:
-    *   - temperature_threshold: Results in this [temperature_threshold, temperature_threshold] which if exceeded results in a DeviceStatus publish.
-    *   - min_interval_ms: Optional minimal interval at which the DeviceStatus is published even if nothing changed.
-    * Output: DeviceStatus information.
-  */
+  /// Subscribe to the DeviceStatus information, i.e. if the DeviceStatus changes, it gets published to the subscribers.
+  /// Excluded from the DeviceStatus change publish are the fields min_cycle_time, max_cycle_time, timestamp, because they change to frequently.
+  /// The temperature field is acknowledged only after exceeding a threshold.
+  /// Input:
+  ///   - temperature_threshold: Results in this [temperature_threshold, temperature_threshold] which if exceeded results in a DeviceStatus publish.
+  ///   - min_interval_ms: Optional minimal interval at which the DeviceStatus is published even if nothing changed.
+  /// Output: DeviceStatus information.
   rpc SubscribeToDeviceStatus(SubscribeStatusRequest) returns (stream DeviceStatus);
 
-  /**
-    * The DeviceStatus gets loged periodically every 60s and if the status_code, state, sync_state or missed_cycles change.
-    * Furthermore, the log entries get stored in a ring buffer, i.e. if it would exceeds the allocated memory the oldest entry gets replaced.
-    * Input: In the log entry list the newest elements have the lowest indecies.
-    *   - offset: Starting position with 0 the newest entry; 10 would mean to skip the 10 newest entries
-    *   - limit: Number of entries to send with the maximum of 30
-    * Output:
-    *   - total_entries: Number of currently stored entries.
-    *   - log_entries: List of log entries according to the pagination parameters
-  */
+  /// The DeviceStatus gets loged periodically every 60s and if the status_code, state, sync_state or missed_cycles change.
+  /// Furthermore, the log entries get stored in a ring buffer, i.e. if it would exceeds the allocated memory the oldest entry gets replaced.
+  /// Input: In the log entry list the newest elements have the lowest indecies.
+  ///   - offset: Starting position with 0 the newest entry; 10 would mean to skip the 10 newest entries
+  ///   - limit: Number of entries to send with the maximum of 30
+  /// Output:
+  ///   - total_entries: Number of currently stored entries.
+  ///   - log_entries: List of log entries according to the pagination parameters
   rpc GetDeviceStatusLog(GetLogRequest) returns (GetLogResponse);
 
-  /**
-    * Get device information.
-    * Input: None.
-    * Output: Device information.
-  */
+  /// Get device information.
+  /// Input: None.
+  /// Output: Device information.
   rpc GetDeviceInfo(Empty) returns (DeviceInfo);
   
-  /**
-    * Get the process data layout, i.e. what data the device can provide or which inputs it has.
-    * Input: None.
-    * Ouput: List of process variables of the device
-  */
+  /// Get the process data layout, i.e. what data the device can provide or which inputs it has.
+  /// Input: None.
+  /// Ouput: List of process variables of the device
   rpc GetProcessDataLayout(Empty) returns (ProcessDataLayoutResponse);
 
-  /**
-    * Get a token to authenticate against the secured API endpoints.
-    * Input: 
-    *   - shared_key: Slave key derived from the master key and the serial number of the slave device.
-    * Ouput:
-    *   - token: Valid token if operation successful. Otherwise is this field empty.
-    *   - status_code: Status information in case of an error.
-  */
+  /// Get a token to authenticate against the secured API endpoints.
+  /// Input:
+  ///   - shared_key: Slave key derived from the master key and the serial number of the slave device.
+  /// Ouput:
+  ///   - token: Valid token if operation successful. Otherwise is this field empty.
+  ///   - status_code: Status information in case of an error.
   rpc GetToken(GetTokenRequest) returns (GetTokenResponse);
 
-  /**
-    * Reset the sequence number used for the generation of tags in the Hash-based Message Authentication Code (HMAC) 
-  */
+  /// Reset the sequence number used for the generation of tags in the Hash-based Message Authentication Code (HMAC)
   rpc ResetSequenceNumber(Empty) returns (StatusResponse);
 }

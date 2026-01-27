@@ -1,4 +1,10 @@
-use common::slave_api::{ProcessVariable, DataType, VariableDirection};
+#![allow(dead_code)]
+//! Hardware Mock
+//!
+//! This is a mock for the hardware implementation by an manufacturer.
+//! It implements an process image with simulated data and the ProcessImageAccess trait to access the data.
+
+use common::slave_api::{DataType, ProcessVariable, VariableDirection};
 use std::sync::{Arc, RwLock};
 
 use crate::process_image_access::ProcessImageAccess;
@@ -15,8 +21,8 @@ pub struct DummyHardware {
 impl DummyHardware {
     /// Create an instance of DummyHardware
     ///
-    /// Initialize memory with zeros. 
-    /// Input: 2 bytes (INT16). 
+    /// Initialize memory with zeros.
+    /// Input: 2 bytes (INT16).
     /// Output: 1 byte (BOOL).
     pub fn new() -> Self {
         Self {
@@ -58,7 +64,7 @@ impl ProcessImageAccess for DummyHardware {
                 name: "Status_LED".to_string(),
                 data_type: DataType::Bool as i32,
                 direction: VariableDirection::Output as i32,
-                byte_offset: 2, 
+                byte_offset: 2,
                 bit_offset: 0,
                 bit_len: 1,
             },
