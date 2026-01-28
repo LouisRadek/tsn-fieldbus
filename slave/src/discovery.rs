@@ -116,49 +116,48 @@ fn handle_packet(
             );
         }
         SdcpOpCode::SetIpReq => {
-            if raw_payload.len() > 5 {
-                if let Ok(tlv) = Tlv::read_from(&raw_payload[5..]) {
-                    if let Some(ip_config) = tlv.parse_ip_config() {
-                        info!("Received IP Config: {ip_config:?}");
+            if raw_payload.len() > 5
+                && let Ok(tlv) = Tlv::read_from(&raw_payload[5..])
+                && let Some(ip_config) = tlv.parse_ip_config()
+            {
+                info!("Received IP Config: {ip_config:?}");
 
-                        match network_interface_access.apply_ip_config(
-                            ip_config.ip,
-                            ip_config.netmask,
-                            ip_config.gateway,
-                        ) {
-                            Ok(_) => {
-                                info!("Successfully applied IP configuration to network interface");
+                match network_interface_access.apply_ip_config(
+                    ip_config.ip,
+                    ip_config.netmask,
+                    ip_config.gateway,
+                ) {
+                    Ok(_) => {
+                        info!("Successfully applied IP configuration to network interface");
 
-                                let mut device_info = device_info_access.read_device_info();
-                                device_info.ip_address = ip_config.ip.to_vec();
-                                device_info.netmask = ip_config.netmask.to_vec();
-                                device_info.gateway = ip_config.gateway.to_vec();
-                                device_info_access.write_device_info(device_info);
+                        let mut device_info = device_info_access.read_device_info();
+                        device_info.ip_address = ip_config.ip.to_vec();
+                        device_info.netmask = ip_config.netmask.to_vec();
+                        device_info.gateway = ip_config.gateway.to_vec();
+                        device_info_access.write_device_info(device_info);
 
-                                let status_tlv = Tlv::status_report(StatusCode::NoError);
-                                send_response(
-                                    transmitter,
-                                    interface,
-                                    ethernet_frame.get_source(),
-                                    SdcpOpCode::SetIpRes,
-                                    header.transaction_id,
-                                    status_tlv,
-                                );
-                            }
-                            Err(e) => {
-                                warn!("Failed to apply IP configuration: {e}");
+                        let status_tlv = Tlv::status_report(StatusCode::NoError);
+                        send_response(
+                            transmitter,
+                            interface,
+                            ethernet_frame.get_source(),
+                            SdcpOpCode::SetIpRes,
+                            header.transaction_id,
+                            status_tlv,
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to apply IP configuration: {e}");
 
-                                let status_tlv = Tlv::status_report(StatusCode::OsFailure);
-                                send_response(
-                                    transmitter,
-                                    interface,
-                                    ethernet_frame.get_source(),
-                                    SdcpOpCode::SetIpRes,
-                                    header.transaction_id,
-                                    status_tlv,
-                                );
-                            }
-                        }
+                        let status_tlv = Tlv::status_report(StatusCode::OsFailure);
+                        send_response(
+                            transmitter,
+                            interface,
+                            ethernet_frame.get_source(),
+                            SdcpOpCode::SetIpRes,
+                            header.transaction_id,
+                            status_tlv,
+                        );
                     }
                 }
             }
