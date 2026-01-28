@@ -382,7 +382,7 @@ mod tests {
 
         let sent = sender.get_sent_packets();
         assert!(!sent.is_empty(), "Response packet should have been sent");
-        assert!(sent[0].len() > 0, "Response packet should not be empty");
+        assert!(!sent[0].is_empty(), "Response packet should not be empty");
     }
 
     #[test]
@@ -507,7 +507,7 @@ mod tests {
 
         let sent = sender.get_sent_packets();
         assert!(!sent.is_empty(), "GetIpRes packet should have been sent");
-        assert!(sent[0].len() > 0, "Response packet should not be empty");
+        assert!(!sent[0].is_empty(), "Response packet should not be empty");
     }
 
     #[test]
@@ -567,8 +567,7 @@ mod tests {
             let sent = sender.get_sent_packets();
             assert!(
                 !sent.is_empty(),
-                "Packet should have been sent for opcode {:?}",
-                opcode
+                "Packet should have been sent for opcode {opcode:?}"
             );
         }
     }
