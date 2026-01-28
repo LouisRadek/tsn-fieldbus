@@ -68,16 +68,24 @@ enum VariableDirection {
   OUTPUT = 1; // Sensor -> Master
 }
 
+enum IpSource {
+    UNSPECIFIED = 0;
+    SDCP = 1;
+    DHCP = 2;
+    MANUELL = 3;
+}
+
 message DeviceInfo {
   bytes mac_address = 1;
   bytes ip_address = 2;
-  bytes netmask = 3;
-  bytes gateway = 4;
-  uint32 vendor_id = 5;
-  uint32 device_id = 6;
-  uint32 serial_number = 7;
-  uint32 firmware_version = 8;
-  uint32 capabilities = 9;
+  IpSource ip_source = 3;
+  bytes netmask = 4;
+  bytes gateway = 5;
+  uint32 vendor_id = 6;
+  uint32 device_id = 7;
+  uint32 serial_number = 8;
+  uint32 firmware_version = 9;
+  uint32 capabilities = 10;
 }
 
 message DeviceStatus {

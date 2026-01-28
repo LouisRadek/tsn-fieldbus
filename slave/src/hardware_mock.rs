@@ -6,10 +6,10 @@
 //! the `ProcessImageAccess` and `DeviceInfoAccess` traits to provide access
 //! to process variables and device information respectively.
 
-use common::slave_api::{DataType, DeviceInfo, ProcessVariable, VariableDirection};
+use common::slave_api::{DataType, DeviceInfo, IpSource, ProcessVariable, VariableDirection};
 use std::sync::{Arc, RwLock};
 
-use crate::hardware_abstraction::{DeviceInfoAccess, ProcessImageAccess};
+use crate::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess, ProcessImageAccess};
 
 /// Mock thread-safe hardware implementation for testing.
 /// Simulates:
@@ -37,6 +37,7 @@ impl DummyHardware {
             device_info: Arc::new(RwLock::new(DeviceInfo {
                 mac_address: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
                 ip_address: vec![0, 0, 0, 0],
+                ip_source: IpSource::Unspecified.into(),
                 netmask: vec![255, 255, 255, 0],
                 gateway: vec![0, 0, 0, 0],
                 vendor_id: 42,
@@ -75,6 +76,7 @@ impl DeviceInfoAccess for DummyHardware {
             DeviceInfo {
                 mac_address: vec![0, 0, 0, 0, 0, 0],
                 ip_address: vec![0, 0, 0, 0],
+                ip_source: IpSource::Unspecified.into(),
                 netmask: vec![255, 255, 255, 0],
                 gateway: vec![0, 0, 0, 0],
                 vendor_id: 0,
@@ -84,6 +86,38 @@ impl DeviceInfoAccess for DummyHardware {
                 capabilities: 0,
             }
         }
+    }
+
+    fn write_device_info(&self, info: DeviceInfo) {
+        if let Ok(mut lock) = self.device_info.write() {
+            *lock = info;
+        }
+    }
+}
+
+impl NetworkInterfaceAccess for DummyHardware {
+    fn apply_ip_config(
+        &self,
+        ip: [u8; 4],
+        netmask: [u8; 4],
+        gateway: [u8; 4],
+    ) -> Result<(), String> {
+        eprintln!(
+            "Mock: Applying IP config - IP: {}.{}.{}.{}, Netmask: {}.{}.{}.{}, Gateway: {}.{}.{}.{}",
+            ip[0],
+            ip[1],
+            ip[2],
+            ip[3],
+            netmask[0],
+            netmask[1],
+            netmask[2],
+            netmask[3],
+            gateway[0],
+            gateway[1],
+            gateway[2],
+            gateway[3]
+        );
+        Ok(())
     }
 }
 
@@ -327,6 +361,54 @@ mod tests {
                 let info = hw_clone.read_device_info();
                 assert_eq!(info.serial_number, 0x12345678);
                 assert_eq!(info.mac_address, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_write_device_info() {
+        let hw = DummyHardware::new();
+
+        let mut new_info = hw.read_device_info();
+        new_info.ip_address = vec![192, 168, 1, 100];
+        new_info.netmask = vec![255, 255, 255, 0];
+        new_info.gateway = vec![192, 168, 1, 1];
+
+        hw.write_device_info(new_info);
+
+        let updated_info = hw.read_device_info();
+        assert_eq!(updated_info.ip_address, vec![192, 168, 1, 100]);
+        assert_eq!(updated_info.netmask, vec![255, 255, 255, 0]);
+        assert_eq!(updated_info.gateway, vec![192, 168, 1, 1]);
+    }
+
+    #[test]
+    fn test_concurrent_device_info_write_read() {
+        let hw = Arc::new(DummyHardware::new());
+        let mut handles = vec![];
+
+        // Writer threads
+        for i in 0..3 {
+            let hw_clone = Arc::clone(&hw);
+            let handle = thread::spawn(move || {
+                let mut info = hw_clone.read_device_info();
+                info.ip_address = vec![10, 0, 0, i];
+                hw_clone.write_device_info(info);
+            });
+            handles.push(handle);
+        }
+
+        // Reader threads
+        for _ in 0..3 {
+            let hw_clone = Arc::clone(&hw);
+            let handle = thread::spawn(move || {
+                let info = hw_clone.read_device_info();
+                assert!(info.ip_address.len() == 4);
             });
             handles.push(handle);
         }

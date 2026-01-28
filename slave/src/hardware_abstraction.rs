@@ -40,4 +40,46 @@ pub trait DeviceInfoAccess: Send + Sync {
     /// - The data is typically retrieved from EEPROM, flash, or configuration storage
     /// - This method should be thread-safe and idempotent
     fn read_device_info(&self) -> DeviceInfo;
+
+    /// Writes the device information to hardware storage.
+    ///
+    /// This allows updating device info such as IP configuration that may need to be
+    /// persisted or synchronized across threads. Typically used for:
+    /// - Updating IP address via SDCP SetIpReq
+    /// - Updating network configuration (netmask, gateway)
+    /// - Other runtime configuration changes
+    ///
+    /// # Arguments
+    /// * `info` - The new device information to store
+    ///
+    /// # Implementation Notes
+    /// - Implementations should use interior mutability (e.g., RwLock, Mutex) to allow mutation through &self
+    /// - Should handle potential hardware write failures gracefully
+    /// - This method should be thread-safe
+    fn write_device_info(&self, info: DeviceInfo);
+}
+
+/// Trait abstracting the network interface configuration.
+///
+/// The manufacturer must implement the logic for configuring network settings on the actual network interface,
+/// such as applying IP addresses, netmasks, and gateways to the device's network card.
+pub trait NetworkInterfaceAccess: Send + Sync {
+    /// Applies IP configuration to the network interface.
+    ///
+    /// Configures the actual network interface with the provided IP settings.
+    /// This is a hardware/system operation that may fail (e.g., permission denied, interface not available).
+    ///
+    /// # Arguments
+    /// * `ip` - IP address as [u8; 4]
+    /// * `netmask` - Network mask as [u8; 4]
+    /// * `gateway` - Default gateway as [u8; 4]
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err(String)` with error description on failure
+    fn apply_ip_config(
+        &self,
+        ip: [u8; 4],
+        netmask: [u8; 4],
+        gateway: [u8; 4],
+    ) -> Result<(), String>;
 }

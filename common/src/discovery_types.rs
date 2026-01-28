@@ -38,12 +38,14 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Cursor, Read};
 
-use crate::status_codes::StatusCode;
+use crate::{slave_api::IpSource, status_codes::StatusCode};
 
 /// EtherType value for SDCP protocol frames
 pub const ETHERTYPE_SDCP: u16 = 0x88B5;
 /// SDCP protocol version (currently 0x01)
 pub const SDCP_VERSION: u8 = 0x01;
+/// SDCP Header size (currently 5 bytes)
+pub const SDCP_HEADER_SIZE: u8 = 5;
 /// Default flags for SDCP headers
 pub const SDCP_FLAGS: u8 = 0x00;
 /// TLV type identifier for device information
@@ -107,10 +109,10 @@ impl From<u8> for SdcpOpCode {
 #[repr(C, packed)]
 #[derive(Debug)]
 pub struct SdcpHeader {
-    version: u8,
-    op_code: SdcpOpCode,
-    transaction_id: u16,
-    flags: u8,
+    pub version: u8,
+    pub op_code: SdcpOpCode,
+    pub transaction_id: u16,
+    pub flags: u8,
 }
 
 impl SdcpHeader {
@@ -160,45 +162,6 @@ impl SdcpHeader {
             transaction_id,
             flags,
         })
-    }
-
-    pub fn get_version(&self) -> u8 {
-        self.version
-    }
-
-    pub fn get_op_code(&self) -> SdcpOpCode {
-        self.op_code
-    }
-
-    pub fn get_transaction_id(&self) -> u16 {
-        self.transaction_id
-    }
-
-    pub fn get_flags(&self) -> u8 {
-        self.flags
-    }
-}
-
-/// Source of IP address assignment
-///
-/// Indicates how a device obtained its IP address configuration
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum IpSource {
-    Sdcp = 0x01,
-    Manuell = 0x02,
-    Dhcp = 0x03,
-    Unspecified = 0x04,
-}
-
-impl From<u8> for IpSource {
-    fn from(val: u8) -> Self {
-        match val {
-            0x01 => IpSource::Sdcp,
-            0x02 => IpSource::Manuell,
-            0x03 => IpSource::Dhcp,
-            _ => IpSource::Unspecified,
-        }
     }
 }
 
@@ -252,8 +215,8 @@ pub struct IpReport {
 /// - **Value** (variable): The actual data payload
 #[derive(Debug)]
 pub struct Tlv {
-    t_type: u8,
-    length: u8,
+    pub t_type: u8,
+    pub length: u8,
     value: Vec<u8>,
 }
 
@@ -271,10 +234,6 @@ impl Tlv {
             length: value.len() as u8,
             value,
         }
-    }
-
-    pub fn get_type(&self) -> u8 {
-        self.t_type
     }
 
     /// Create a device info TLV
@@ -309,8 +268,8 @@ impl Tlv {
     ///
     /// # Arguments
     /// * `status_code` - The device status code
-    pub fn status_report(status_code: u8) -> Self {
-        Tlv::new(TLV_TYPE_STATUS_REPORT, vec![status_code])
+    pub fn status_report(status_code: StatusCode) -> Self {
+        Tlv::new(TLV_TYPE_STATUS_REPORT, vec![status_code as u8])
     }
 
     /// Create an IP report TLV (current IP configuration with source)
@@ -422,7 +381,7 @@ impl Tlv {
         ip.copy_from_slice(&self.value[0..4]);
         netmask.copy_from_slice(&self.value[4..8]);
         gateway.copy_from_slice(&self.value[8..12]);
-        let ip_source = IpSource::from(self.value[12]);
+        let ip_source = IpSource::try_from(self.value[12] as i32).unwrap_or_default();
         Some(IpReport {
             ip,
             netmask,
@@ -446,10 +405,11 @@ mod tests {
     #[test]
     fn test_sdcp_header_new() {
         let header = SdcpHeader::new(SdcpOpCode::DiscoverReq, 0x1234);
-        assert_eq!(header.get_version(), SDCP_VERSION);
-        assert_eq!(header.get_op_code(), SdcpOpCode::DiscoverReq);
-        assert_eq!(header.get_transaction_id(), 0x1234);
-        assert_eq!(header.get_flags(), SDCP_FLAGS);
+        assert_eq!(header.version, SDCP_VERSION);
+        assert_eq!(header.op_code, SdcpOpCode::DiscoverReq);
+        let transaction_id = header.transaction_id;
+        assert_eq!(transaction_id, 0x1234);
+        assert_eq!(header.flags, SDCP_FLAGS);
     }
 
     #[test]
@@ -458,23 +418,17 @@ mod tests {
         let mut buf = Vec::new();
         original.write_to(&mut buf).unwrap();
         let read = SdcpHeader::read_from(&buf).unwrap();
-        assert_eq!(read.get_version(), original.get_version());
-        assert_eq!(read.get_op_code(), original.get_op_code());
-        assert_eq!(read.get_transaction_id(), original.get_transaction_id());
-    }
-
-    #[test]
-    fn test_ip_source_from_u8() {
-        assert_eq!(IpSource::from(0x01), IpSource::Sdcp);
-        assert_eq!(IpSource::from(0x02), IpSource::Manuell);
-        assert_eq!(IpSource::from(0x03), IpSource::Dhcp);
-        assert_eq!(IpSource::from(0xFF), IpSource::Unspecified);
+        assert_eq!(read.version, original.version);
+        assert_eq!(read.op_code, original.op_code);
+        let read_transaction_id = read.transaction_id;
+        let original_transaction_id = original.transaction_id;
+        assert_eq!(read_transaction_id, original_transaction_id);
     }
 
     #[test]
     fn test_tlv_device_info() {
         let tlv = Tlv::device_info(0x1234, 0x5678, 0xDEADBEEF);
-        assert_eq!(tlv.get_type(), TLV_TYPE_DEVICE_INFO);
+        assert_eq!(tlv.t_type, TLV_TYPE_DEVICE_INFO);
         let device_info_parsed = tlv.parse_device_info().unwrap();
         assert_eq!(device_info_parsed.vendor_id, 0x1234);
         assert_eq!(device_info_parsed.device_id, 0x5678);
@@ -508,11 +462,11 @@ mod tests {
 
     #[test]
     fn test_tlv_write_read() {
-        let original = Tlv::status_report(0x42);
+        let original = Tlv::status_report(StatusCode::NoError);
         let mut buf = Vec::new();
         original.write_to(&mut buf).unwrap();
         let read = Tlv::read_from(&buf).unwrap();
-        assert_eq!(read.get_type(), original.get_type());
+        assert_eq!(read.t_type, original.t_type);
         assert_eq!(read.value, original.value);
     }
 }
