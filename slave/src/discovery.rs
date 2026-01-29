@@ -20,7 +20,6 @@ use pnet::packet::Packet;
 use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use std::{cmp, thread};
 
 use crate::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
