@@ -96,9 +96,6 @@ fn handle_packet(
         SdcpOpCode::DiscoverReq => {
             info!("Received DISCOVER_REQ from {}", ethernet_frame.get_source());
 
-            // Artificial random delay to prevent response storm
-            thread::sleep(Duration::from_millis(50));
-
             let device_info = device_info_access.read_device_info();
             let tlv = Tlv::device_info(
                 device_info.vendor_id as u16,
@@ -208,12 +205,12 @@ fn send_response(
     interface: &NetworkInterface,
     target_mac: MacAddr,
     op_code: SdcpOpCode,
-    trans_id: u16,
+    transaction_id: u16,
     payload_tlv: Tlv,
 ) {
-    // Ethernet Header (14 bytes), SDCP Header Size, TLV Lenght
-    let required_buffer_size = 14 + SDCP_HEADER_SIZE + payload_tlv.length;
-    let mut buffer = vec![0u8; cmp::max(required_buffer_size as usize, 64)];
+    // Ethernet Header (14 bytes), SDCP Header Size, TLV Lenght, 2 for the type and lenght field of the tlv
+    let required_buffer_size = 14 + SDCP_HEADER_SIZE + payload_tlv.length + 2;
+    let mut buffer = vec![0u8; cmp::max(required_buffer_size as usize, 60)];
 
     let mut eth = MutableEthernetPacket::new(&mut buffer).unwrap();
     eth.set_destination(target_mac);
@@ -221,7 +218,7 @@ fn send_response(
     eth.set_ethertype(ethernet::EtherType(ETHERTYPE_SDCP));
 
     let mut payload_buffer = Vec::new();
-    let header = SdcpHeader::new(op_code, trans_id);
+    let header = SdcpHeader::new(op_code, transaction_id);
     header.write_to(&mut payload_buffer).unwrap();
     payload_tlv.write_to(&mut payload_buffer).unwrap();
 
