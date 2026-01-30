@@ -1,0 +1,22 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Workspace crates with test-utils feature enabled
+master = { path = "../master", features = ["test-utils"] }
+slave = { path = "../slave", features = ["test-utils"] }
+common = { path = "../common" }
+
+# For raw socket mocking
+pnet = "0.35"
+
+# For logging in tests
+log = "0.4"
+env_logger = "0.11"
+
+[lib]
+name = "integration_tests"
+path = "src/lib.rs"

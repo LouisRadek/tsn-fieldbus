@@ -2,6 +2,7 @@
 members = [
     "common",
     "master",
-    "slave"
+    "slave",
+    "tests"
 ]
 resolver = "2"

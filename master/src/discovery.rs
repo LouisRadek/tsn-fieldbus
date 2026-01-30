@@ -22,7 +22,8 @@
 //! For concurrent access, wrap it in appropriate synchronization primitives.
 
 use common::discovery_types::{
-    DeviceInfo, ETHERTYPE_SDCP, IpReport, SDCP_HEADER_SIZE, SdcpHeader, SdcpOpCode, Tlv,
+    DiscoveredDevice, DiscoveryError, ETHERTYPE_SDCP, IpReport, SDCP_HEADER_SIZE, SdcpHeader,
+    SdcpOpCode, Tlv,
 };
 use common::status_codes::StatusCode;
 use log::{debug, info, warn};
@@ -47,78 +48,10 @@ const DEFAULT_UNICAST_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Minimum Ethernet frame size (excluding FCS)
 const MIN_FRAME_SIZE: usize = 60;
 
-/// Represents a discovered device with its network and identification information
-#[derive(Debug, Clone)]
-pub struct DiscoveredDevice {
-    pub mac_address: MacAddr,
-    pub vendor_id: u16,
-    pub device_id: u16,
-    pub serial_number: u32,
-}
-
-impl DiscoveredDevice {
-    fn new(mac_address: MacAddr, device_info: DeviceInfo) -> Self {
-        Self {
-            mac_address,
-            vendor_id: device_info.vendor_id,
-            device_id: device_info.device_id,
-            serial_number: device_info.serial_number,
-        }
-    }
-}
-
-/// Error types for discovery operations
-#[derive(Debug)]
-pub enum DiscoveryError {
-    InterfaceNotFound(String),
-    ChannelCreationFailed(String),
-    Timeout,
-    InvalidResponse(String),
-    DeviceError(StatusCode),
-    IoError(io::Error),
-}
-
-impl std::fmt::Display for DiscoveryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DiscoveryError::InterfaceNotFound(name) => {
-                write!(f, "Network interface not found: {name}")
-            }
-            DiscoveryError::ChannelCreationFailed(msg) => {
-                write!(f, "Failed to create datalink channel: {msg}")
-            }
-            DiscoveryError::Timeout => write!(f, "Timeout waiting for response"),
-            DiscoveryError::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
-            DiscoveryError::DeviceError(code) => write!(f, "Device error: {code}"),
-            DiscoveryError::IoError(e) => write!(f, "I/O error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for DiscoveryError {}
-
-impl From<io::Error> for DiscoveryError {
-    fn from(err: io::Error) -> Self {
-        DiscoveryError::IoError(err)
-    }
-}
-
 /// Master-side SDCP discovery controller
 ///
 /// Manages discovery operations including device scanning, IP queries,
 /// and IP configuration. Maintains a cache of discovered devices.
-///
-/// # Example
-///
-/// ```no_run
-/// use master::discovery::DiscoveryMaster;
-///
-/// let mut master = DiscoveryMaster::new("eth0").expect("Failed to initialize");
-/// let devices = master.discover_devices().expect("Discovery failed");
-/// for device in devices {
-///     println!("Found: {:?}", device);
-/// }
-/// ```
 pub struct DiscoveryMaster {
     interface: NetworkInterface,
     transmitter: Box<dyn DataLinkSender>,
@@ -170,8 +103,12 @@ impl DiscoveryMaster {
     }
 
     /// Creates a `DiscoveryMaster` with injected mock components for testing.
-    #[cfg(test)]
-    fn new_with_mocks(
+    ///
+    /// This constructor is available when the `test-utils` feature is enabled,
+    /// or during unit tests. It allows injecting mock network components
+    /// for deterministic testing without real network access.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_with_mocks(
         interface: NetworkInterface,
         transmitter: Box<dyn DataLinkSender>,
         receiver: Box<dyn DataLinkReceiver>,
@@ -375,8 +312,8 @@ impl DiscoveryMaster {
             .and_then(|payload| {
                 if payload.len() > SDCP_HEADER_SIZE as usize {
                     let tlv_data = &payload[SDCP_HEADER_SIZE as usize..];
-                    if let Ok(tlv) = Tlv::read_from(tlv_data) {
-                        if let Some(status) = tlv.parse_status_report() {
+                    if let Ok(tlv) = Tlv::read_from(tlv_data)
+                        && let Some(status) = tlv.parse_status_report() {
                             return if status == StatusCode::NoError {
                                 info!("IP configuration successfully applied to {target_mac}");
                                 Ok(())
@@ -385,7 +322,6 @@ impl DiscoveryMaster {
                                 Err(DiscoveryError::DeviceError(status))
                             };
                         }
-                    }
                 }
                 Err(DiscoveryError::InvalidResponse(
                     "Failed to parse status response".to_string(),
@@ -476,8 +412,8 @@ impl DiscoveryMaster {
                         }
 
                         let payload = ethernet_frame.payload();
-                        if let Ok(header) = SdcpHeader::read_from(payload) {
-                            if header.op_code == expected_opcode
+                        if let Ok(header) = SdcpHeader::read_from(payload)
+                            && header.op_code == expected_opcode
                                 && header.transaction_id == expected_transaction_id
                             {
                                 debug!(
@@ -485,7 +421,6 @@ impl DiscoveryMaster {
                                 );
                                 return Ok(payload.to_vec());
                             }
-                        }
                     }
                 }
                 Err(e) => {
@@ -528,6 +463,8 @@ fn process_discover_frame(
 
 #[cfg(test)]
 mod tests {
+    use common::discovery_types::DeviceInfo;
+
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;

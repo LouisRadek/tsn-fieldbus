@@ -2,16 +2,7 @@ use std::{sync::Arc, thread, time::Duration};
 
 use common::slave_api::DeviceState;
 use log::info;
-
-use crate::{
-    hardware_abstraction::ProcessImageAccess, hardware_mock::DummyHardware,
-    state_machine::DeviceStateManager,
-};
-
-mod discovery;
-mod hardware_abstraction;
-mod hardware_mock;
-mod state_machine;
+use slave::{DeviceStateManager, DummyHardware, ProcessImageAccess};
 
 fn main() {
     env_logger::init();

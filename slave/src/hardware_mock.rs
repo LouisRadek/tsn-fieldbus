@@ -22,6 +22,12 @@ pub struct DummyHardware {
     device_info: Arc<RwLock<DeviceInfo>>,
 }
 
+impl Default for DummyHardware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DummyHardware {
     /// Create an instance of DummyHardware
     ///

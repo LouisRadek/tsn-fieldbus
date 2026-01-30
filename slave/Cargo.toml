@@ -3,6 +3,10 @@ name = "slave"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+test-utils = []
+
 [dependencies]
 # Internal workspace dependency
 common = { path = "../common" }

@@ -36,6 +36,7 @@
 //! ```
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use pnet::util::MacAddr;
 use std::io::{self, Cursor, Read};
 
 use crate::{slave_api::IpSource, status_codes::StatusCode};
@@ -162,6 +163,62 @@ impl SdcpHeader {
             transaction_id,
             flags,
         })
+    }
+}
+
+/// Error types for discovery operations
+#[derive(Debug)]
+pub enum DiscoveryError {
+    InterfaceNotFound(String),
+    ChannelCreationFailed(String),
+    Timeout,
+    InvalidResponse(String),
+    DeviceError(StatusCode),
+    IoError(io::Error),
+}
+
+impl std::fmt::Display for DiscoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiscoveryError::InterfaceNotFound(name) => {
+                write!(f, "Network interface not found: {name}")
+            }
+            DiscoveryError::ChannelCreationFailed(msg) => {
+                write!(f, "Failed to create datalink channel: {msg}")
+            }
+            DiscoveryError::Timeout => write!(f, "Timeout waiting for response"),
+            DiscoveryError::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
+            DiscoveryError::DeviceError(code) => write!(f, "Device error: {code}"),
+            DiscoveryError::IoError(e) => write!(f, "I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DiscoveryError {}
+
+impl From<io::Error> for DiscoveryError {
+    fn from(err: io::Error) -> Self {
+        DiscoveryError::IoError(err)
+    }
+}
+
+/// Represents a discovered device with its network and identification information
+#[derive(Debug, Clone)]
+pub struct DiscoveredDevice {
+    pub mac_address: MacAddr,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub serial_number: u32,
+}
+
+impl DiscoveredDevice {
+    pub fn new(mac_address: MacAddr, device_info: DeviceInfo) -> Self {
+        Self {
+            mac_address,
+            vendor_id: device_info.vendor_id,
+            device_id: device_info.device_id,
+            serial_number: device_info.serial_number,
+        }
     }
 }
 

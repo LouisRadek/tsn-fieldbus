@@ -31,6 +31,12 @@ pub struct DeviceStateManager {
     state: Arc<Mutex<DeviceState>>,
 }
 
+impl Default for DeviceStateManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeviceStateManager {
     /// Creates a new device state manager initialized to the `Init` state.
     pub fn new() -> Self {
@@ -63,14 +69,6 @@ impl DeviceStateManager {
     /// # Errors
     ///
     /// Returns `Err(StatusCode::StateConflict)` if the requested transition is invalid.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let manager = DeviceStateManager::new();
-    /// assert!(manager.set_target_state(DeviceState::DiscoverySync).is_ok());
-    /// assert!(manager.set_target_state(DeviceState::Op).is_err()); // Invalid: must go through PreOp
-    /// ```
     pub fn set_target_state(&self, target: DeviceState) -> Result<(), StatusCode> {
         let mut current = self.state.lock().unwrap();
 

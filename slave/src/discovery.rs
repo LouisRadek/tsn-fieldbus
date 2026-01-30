@@ -82,7 +82,27 @@ pub fn start_discovery_listener(
     });
 }
 
-fn handle_packet(
+/// Handles incoming SDCP packets and generates appropriate responses.
+///
+/// This function processes discovery protocol messages and sends responses
+/// back through the provided transmitter.
+///
+/// # Arguments
+///
+/// * `header` - Parsed SDCP header from the incoming packet
+/// * `raw_payload` - Raw SDCP payload bytes (including header)
+/// * `ethernet_frame` - The complete Ethernet frame for extracting source MAC
+/// * `transmitter` - Network transmitter for sending responses
+/// * `interface` - Local network interface information
+/// * `device_info_access` - Access to device identification and configuration
+/// * `network_interface_access` - Access to network interface configuration
+///
+/// # Visibility
+///
+/// This function is public when the `test-utils` feature is enabled,
+/// allowing integration tests to directly invoke packet handling.
+#[cfg(feature = "test-utils")]
+pub fn handle_packet(
     header: &SdcpHeader,
     raw_payload: &[u8],
     ethernet_frame: &EthernetPacket,
