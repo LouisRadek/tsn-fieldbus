@@ -80,6 +80,7 @@ impl DeviceInfoAccess for MockDeviceInfo {
 }
 
 struct MockNetworkInterface {
+    #[allow(clippy::type_complexity)]
     applied_configs: Mutex<Vec<([u8; 4], [u8; 4], [u8; 4])>>,
     should_fail: bool,
 }
@@ -489,30 +490,30 @@ fn test_multiple_devices_discovery() {
             let frame_data = master_to_slave_clone.lock().unwrap().pop_front();
 
             if let Some(frame_vec) = frame_data {
-                if let Some(eth_packet) = EthernetPacket::new(&frame_vec) {
-                    if eth_packet.get_ethertype().0 == ETHERTYPE_SDCP {
-                        let payload = eth_packet.payload();
-                        if let Ok(header) = SdcpHeader::read_from(payload) {
-                            handle_packet(
-                                &header,
-                                payload,
-                                &eth_packet,
-                                &mut slave1_tx,
-                                &slave1_interface,
-                                &slave1_device_info,
-                                &slave_network,
-                            );
-                            handle_packet(
-                                &header,
-                                payload,
-                                &eth_packet,
-                                &mut slave2_tx,
-                                &slave2_interface,
-                                &slave2_device_info,
-                                &slave_network,
-                            );
-                            break;
-                        }
+                if let Some(eth_packet) = EthernetPacket::new(&frame_vec)
+                    && eth_packet.get_ethertype().0 == ETHERTYPE_SDCP
+                {
+                    let payload = eth_packet.payload();
+                    if let Ok(header) = SdcpHeader::read_from(payload) {
+                        handle_packet(
+                            &header,
+                            payload,
+                            &eth_packet,
+                            &mut slave1_tx,
+                            &slave1_interface,
+                            &slave1_device_info,
+                            &slave_network,
+                        );
+                        handle_packet(
+                            &header,
+                            payload,
+                            &eth_packet,
+                            &mut slave2_tx,
+                            &slave2_interface,
+                            &slave2_device_info,
+                            &slave_network,
+                        );
+                        break;
                     }
                 }
             } else {

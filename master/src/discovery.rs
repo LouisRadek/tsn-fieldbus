@@ -313,15 +313,16 @@ impl DiscoveryMaster {
                 if payload.len() > SDCP_HEADER_SIZE as usize {
                     let tlv_data = &payload[SDCP_HEADER_SIZE as usize..];
                     if let Ok(tlv) = Tlv::read_from(tlv_data)
-                        && let Some(status) = tlv.parse_status_report() {
-                            return if status == StatusCode::NoError {
-                                info!("IP configuration successfully applied to {target_mac}");
-                                Ok(())
-                            } else {
-                                warn!("Device {target_mac} rejected IP config: {status}");
-                                Err(DiscoveryError::DeviceError(status))
-                            };
-                        }
+                        && let Some(status) = tlv.parse_status_report()
+                    {
+                        return if status == StatusCode::NoError {
+                            info!("IP configuration successfully applied to {target_mac}");
+                            Ok(())
+                        } else {
+                            warn!("Device {target_mac} rejected IP config: {status}");
+                            Err(DiscoveryError::DeviceError(status))
+                        };
+                    }
                 }
                 Err(DiscoveryError::InvalidResponse(
                     "Failed to parse status response".to_string(),
@@ -414,13 +415,13 @@ impl DiscoveryMaster {
                         let payload = ethernet_frame.payload();
                         if let Ok(header) = SdcpHeader::read_from(payload)
                             && header.op_code == expected_opcode
-                                && header.transaction_id == expected_transaction_id
-                            {
-                                debug!(
-                                    "Received expected response from {expected_source}: {expected_opcode:?}"
-                                );
-                                return Ok(payload.to_vec());
-                            }
+                            && header.transaction_id == expected_transaction_id
+                        {
+                            debug!(
+                                "Received expected response from {expected_source}: {expected_opcode:?}"
+                            );
+                            return Ok(payload.to_vec());
+                        }
                     }
                 }
                 Err(e) => {
