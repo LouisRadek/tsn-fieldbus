@@ -12,6 +12,7 @@
 //! - `SetIpReq/Res`: Set new IP configuration
 
 use common::discovery_types::{ETHERTYPE_SDCP, SDCP_HEADER_SIZE, SdcpHeader, SdcpOpCode, Tlv};
+use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
 use common::slave_api::IpSource;
 use common::status_codes::StatusCode;
 use log::{info, warn};
@@ -21,8 +22,6 @@ use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
 use std::sync::Arc;
 use std::{cmp, thread};
-
-use crate::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
 
 /// Starts a discovery listener that responds to SDCP discovery requests.
 ///
@@ -250,237 +249,125 @@ fn send_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::slave_api::{DeviceInfo, IpSource};
-    use std::sync::{Arc, Mutex};
+    use common::test_mocks::{MockDataLinkSender, MockDeviceInfo, MockNetworkInterface, TEST_MAC};
+    use pnet::util::MacAddr;
+    use std::sync::Arc;
 
-    struct MockDeviceInfoAccess {
-        device_info: Mutex<DeviceInfo>,
+    const MASTER_MAC: MacAddr = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01);
+    const BROADCAST_MAC: MacAddr = MacAddr(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
+    const TEST_IP: [u8; 4] = [10, 0, 0, 50];
+    const TEST_NETMASK: [u8; 4] = [255, 255, 255, 0];
+    const TEST_GATEWAY: [u8; 4] = [10, 0, 0, 1];
+
+    struct TestContext {
+        sender: MockDataLinkSender,
+        device_info: Arc<dyn DeviceInfoAccess>,
+        network_access: Arc<dyn NetworkInterfaceAccess>,
+        interface: NetworkInterface,
     }
 
-    impl MockDeviceInfoAccess {
+    impl TestContext {
         fn new() -> Self {
             Self {
-                device_info: Mutex::new(DeviceInfo {
-                    mac_address: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
-                    ip_address: vec![192, 168, 1, 100],
-                    ip_source: IpSource::Manuell.into(),
-                    netmask: vec![255, 255, 255, 0],
-                    gateway: vec![192, 168, 1, 1],
-                    vendor_id: 0x1234,
-                    device_id: 0x5678,
-                    serial_number: 0xDEADBEEF,
-                    firmware_version: 1,
-                    capabilities: 0,
-                }),
+                sender: MockDataLinkSender::new(),
+                device_info: Arc::new(MockDeviceInfo::new(TEST_MAC)),
+                network_access: Arc::new(MockNetworkInterface::new()),
+                interface: pnet::datalink::interfaces()[0].clone(),
             }
         }
-    }
 
-    impl DeviceInfoAccess for MockDeviceInfoAccess {
-        fn read_device_info(&self) -> DeviceInfo {
-            self.device_info.lock().unwrap().clone()
-        }
-
-        fn write_device_info(&self, info: DeviceInfo) {
-            *self.device_info.lock().unwrap() = info;
-        }
-    }
-
-    struct MockNetworkInterfaceAccess {
-        apply_config_called: Mutex<bool>,
-        apply_config_should_fail: bool,
-    }
-
-    impl MockNetworkInterfaceAccess {
-        fn new() -> Self {
+        fn with_failing_network() -> Self {
             Self {
-                apply_config_called: Mutex::new(false),
-                apply_config_should_fail: false,
+                sender: MockDataLinkSender::new(),
+                device_info: Arc::new(MockDeviceInfo::new(TEST_MAC)),
+                network_access: Arc::new(MockNetworkInterface::failing()),
+                interface: pnet::datalink::interfaces()[0].clone(),
             }
         }
 
-        fn new_fail() -> Self {
-            Self {
-                apply_config_called: Mutex::new(false),
-                apply_config_should_fail: true,
-            }
+        fn handle_request(&mut self, op_code: SdcpOpCode, transaction_id: u16, tlv: Option<Tlv>) {
+            let (payload, header) = build_sdcp_payload(op_code, transaction_id, tlv);
+            let eth_frame = create_ethernet_frame(MASTER_MAC, BROADCAST_MAC);
+
+            handle_packet(
+                &header,
+                &payload,
+                &EthernetPacket::new(&eth_frame).unwrap(),
+                &mut self.sender,
+                &self.interface,
+                &self.device_info,
+                &self.network_access,
+            );
         }
 
-        fn was_called(&self) -> bool {
-            *self.apply_config_called.lock().unwrap()
-        }
-    }
-
-    impl NetworkInterfaceAccess for MockNetworkInterfaceAccess {
-        fn apply_ip_config(
-            &self,
-            _ip: [u8; 4],
-            _netmask: [u8; 4],
-            _gateway: [u8; 4],
-        ) -> Result<(), String> {
-            *self.apply_config_called.lock().unwrap() = true;
-            if self.apply_config_should_fail {
-                Err("Simulated network interface failure".to_string())
-            } else {
-                Ok(())
-            }
+        fn assert_response_sent(&self) {
+            let sent = self.sender.get_sent_packets();
+            assert!(!sent.is_empty(), "Response packet should have been sent");
+            assert!(!sent[0].is_empty(), "Response packet should not be empty");
         }
     }
 
-    struct MockDataLinkSender {
-        sent_packets: Mutex<Vec<Vec<u8>>>,
+    fn build_sdcp_payload(
+        op_code: SdcpOpCode,
+        transaction_id: u16,
+        tlv: Option<Tlv>,
+    ) -> (Vec<u8>, SdcpHeader) {
+        let header = SdcpHeader::new(op_code, transaction_id);
+        let mut payload = Vec::new();
+        header.write_to(&mut payload).unwrap();
+
+        if let Some(tlv) = tlv {
+            tlv.write_to(&mut payload).unwrap();
+        } else {
+            payload.extend_from_slice(&[0u8; 100]);
+        }
+
+        let header_read = SdcpHeader::read_from(&payload).unwrap();
+        (payload, header_read)
     }
 
-    impl MockDataLinkSender {
-        fn new() -> Self {
-            Self {
-                sent_packets: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn get_sent_packets(&self) -> Vec<Vec<u8>> {
-            self.sent_packets.lock().unwrap().clone()
-        }
-    }
-
-    impl datalink::DataLinkSender for MockDataLinkSender {
-        fn send_to(
-            &mut self,
-            packet: &[u8],
-            _dst: Option<pnet::datalink::NetworkInterface>,
-        ) -> Option<Result<(), std::io::Error>> {
-            self.sent_packets.lock().unwrap().push(packet.to_vec());
-            Some(Ok(()))
-        }
-
-        fn build_and_send(
-            &mut self,
-            _num_packets: usize,
-            _packet_size: usize,
-            _func: &mut dyn FnMut(&mut [u8]),
-        ) -> Option<Result<(), std::io::Error>> {
-            Some(Ok(()))
-        }
+    fn create_ethernet_frame(source: MacAddr, destination: MacAddr) -> Vec<u8> {
+        let mut buffer = vec![0u8; 64];
+        let mut eth_packet = MutableEthernetPacket::new(&mut buffer).unwrap();
+        eth_packet.set_source(source);
+        eth_packet.set_destination(destination);
+        buffer
     }
 
     #[test]
     fn test_handle_packet_discover_req() {
-        let device_info: Arc<dyn DeviceInfoAccess> = Arc::new(MockDeviceInfoAccess::new());
-        let network_access: Arc<dyn NetworkInterfaceAccess> =
-            Arc::new(MockNetworkInterfaceAccess::new());
-        let mut sender = MockDataLinkSender::new();
+        let mut ctx = TestContext::new();
 
-        let header = SdcpHeader::new(SdcpOpCode::DiscoverReq, 0x0001);
-        let mut payload = Vec::new();
-        header.write_to(&mut payload).unwrap();
-        payload.extend_from_slice(&[0u8; 100]);
+        ctx.handle_request(SdcpOpCode::DiscoverReq, 0x0001, None);
 
-        let header_read = SdcpHeader::read_from(&payload).unwrap();
-        assert_eq!(header_read.op_code, SdcpOpCode::DiscoverReq);
-
-        let mut buffer = vec![0u8; 64];
-        let mut eth_packet = MutableEthernetPacket::new(&mut buffer).unwrap();
-        eth_packet.set_source(MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01));
-        eth_packet.set_destination(MacAddr(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF));
-
-        let eth_frame = EthernetPacket::new(&buffer).unwrap();
-
-        handle_packet(
-            &header_read,
-            &payload,
-            &eth_frame,
-            &mut sender,
-            &pnet::datalink::interfaces()[0],
-            &Arc::new(device_info),
-            &Arc::new(network_access),
-        );
-
-        let sent = sender.get_sent_packets();
-        assert!(!sent.is_empty(), "Response packet should have been sent");
-        assert!(!sent[0].is_empty(), "Response packet should not be empty");
+        ctx.assert_response_sent();
     }
 
     #[test]
     fn test_handle_packet_set_ip_req_success() {
-        let device_info: Arc<dyn DeviceInfoAccess> = Arc::new(MockDeviceInfoAccess::new());
-        let network_access: Arc<dyn NetworkInterfaceAccess> =
-            Arc::new(MockNetworkInterfaceAccess::new());
-        let mut sender = MockDataLinkSender::new();
+        let mut ctx = TestContext::new();
+        let tlv = Tlv::ip_config(TEST_IP, TEST_NETMASK, TEST_GATEWAY);
 
-        let ip_config = [10, 0, 0, 50];
-        let netmask = [255, 255, 255, 0];
-        let gateway = [10, 0, 0, 1];
-        let tlv = Tlv::ip_config(ip_config, netmask, gateway);
+        ctx.handle_request(SdcpOpCode::SetIpReq, 0x0002, Some(tlv));
 
-        let header = SdcpHeader::new(SdcpOpCode::SetIpReq, 0x0002);
-        let mut payload = Vec::new();
-        header.write_to(&mut payload).unwrap();
-        tlv.write_to(&mut payload).unwrap();
+        ctx.assert_response_sent();
 
-        let mut buffer = vec![0u8; 64];
-        let mut eth_packet = MutableEthernetPacket::new(&mut buffer).unwrap();
-        eth_packet.set_source(MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02));
-        eth_packet.set_destination(MacAddr(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF));
-
-        let eth_frame = EthernetPacket::new(&buffer).unwrap();
-
-        handle_packet(
-            &header,
-            &payload,
-            &eth_frame,
-            &mut sender,
-            &pnet::datalink::interfaces()[0],
-            &Arc::new(device_info.clone()),
-            &Arc::new(network_access.clone()),
-        );
-
-        let sent = sender.get_sent_packets();
-        assert!(!sent.is_empty(), "Response packet should have been sent");
-
-        let updated_info = device_info.read_device_info();
-        assert_eq!(updated_info.ip_address, vec![10, 0, 0, 50]);
-        assert_eq!(updated_info.netmask, vec![255, 255, 255, 0]);
-        assert_eq!(updated_info.gateway, vec![10, 0, 0, 1]);
+        let updated_info = ctx.device_info.read_device_info();
+        assert_eq!(updated_info.ip_address, TEST_IP.to_vec());
+        assert_eq!(updated_info.netmask, TEST_NETMASK.to_vec());
+        assert_eq!(updated_info.gateway, TEST_GATEWAY.to_vec());
     }
 
     #[test]
     fn test_handle_packet_set_ip_req_failure() {
-        let device_info: Arc<dyn DeviceInfoAccess> = Arc::new(MockDeviceInfoAccess::new());
-        let network_access: Arc<dyn NetworkInterfaceAccess> =
-            Arc::new(MockNetworkInterfaceAccess::new_fail());
-        let mut sender = MockDataLinkSender::new();
+        let mut ctx = TestContext::with_failing_network();
+        let tlv = Tlv::ip_config(TEST_IP, TEST_NETMASK, TEST_GATEWAY);
 
-        let ip_config = [10, 0, 0, 50];
-        let netmask = [255, 255, 255, 0];
-        let gateway = [10, 0, 0, 1];
-        let tlv = Tlv::ip_config(ip_config, netmask, gateway);
+        ctx.handle_request(SdcpOpCode::SetIpReq, 0x0003, Some(tlv));
 
-        let header = SdcpHeader::new(SdcpOpCode::SetIpReq, 0x0003);
-        let mut payload = Vec::new();
-        header.write_to(&mut payload).unwrap();
-        tlv.write_to(&mut payload).unwrap();
+        ctx.assert_response_sent();
 
-        let mut buffer = vec![0u8; 64];
-        let mut eth_packet = MutableEthernetPacket::new(&mut buffer).unwrap();
-        eth_packet.set_source(MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x03));
-        eth_packet.set_destination(MacAddr(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF));
-
-        let eth_frame = EthernetPacket::new(&buffer).unwrap();
-
-        handle_packet(
-            &header,
-            &payload,
-            &eth_frame,
-            &mut sender,
-            &pnet::datalink::interfaces()[0],
-            &Arc::new(device_info.clone()),
-            &Arc::new(network_access),
-        );
-
-        let sent = sender.get_sent_packets();
-        assert!(!sent.is_empty(), "Response packet should have been sent");
-
-        let info = device_info.read_device_info();
+        let info = ctx.device_info.read_device_info();
         assert_eq!(
             info.ip_address,
             vec![192, 168, 1, 100],
@@ -490,49 +377,19 @@ mod tests {
 
     #[test]
     fn test_handle_packet_get_ip_req() {
-        let device_info: Arc<dyn DeviceInfoAccess> = Arc::new(MockDeviceInfoAccess::new());
-        let network_access: Arc<dyn NetworkInterfaceAccess> =
-            Arc::new(MockNetworkInterfaceAccess::new());
-        let mut sender = MockDataLinkSender::new();
+        let mut ctx = TestContext::new();
 
-        let header = SdcpHeader::new(SdcpOpCode::GetIpReq, 0x0004);
-        let mut payload = Vec::new();
-        header.write_to(&mut payload).unwrap();
-        payload.extend_from_slice(&[0u8; 100]);
+        ctx.handle_request(SdcpOpCode::GetIpReq, 0x0004, None);
 
-        let header_read = SdcpHeader::read_from(&payload).unwrap();
-        assert_eq!(header_read.op_code, SdcpOpCode::GetIpReq);
-
-        let mut buffer = vec![0u8; 64];
-        let mut eth_packet = MutableEthernetPacket::new(&mut buffer).unwrap();
-        eth_packet.set_source(MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x04));
-        eth_packet.set_destination(MacAddr(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF));
-
-        let eth_frame = EthernetPacket::new(&buffer).unwrap();
-
-        handle_packet(
-            &header_read,
-            &payload,
-            &eth_frame,
-            &mut sender,
-            &pnet::datalink::interfaces()[0],
-            &Arc::new(device_info),
-            &Arc::new(network_access),
-        );
-
-        let sent = sender.get_sent_packets();
-        assert!(!sent.is_empty(), "GetIpRes packet should have been sent");
-        assert!(!sent[0].is_empty(), "Response packet should not be empty");
+        ctx.assert_response_sent();
     }
 
     #[test]
     fn test_send_response_creates_valid_frame() {
         let mut sender = MockDataLinkSender::new();
-        let interfaces = pnet::datalink::interfaces();
-        let interface = &interfaces[0];
-
-        let tlv = Tlv::status_report(StatusCode::NoError);
+        let interface = &pnet::datalink::interfaces()[0];
         let target_mac = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x99);
+        let tlv = Tlv::status_report(StatusCode::NoError);
 
         send_response(
             &mut sender,
@@ -557,9 +414,8 @@ mod tests {
 
     #[test]
     fn test_send_response_with_different_opcodes() {
-        let interfaces = pnet::datalink::interfaces();
-        let interface = &interfaces[0];
-
+        let interface = &pnet::datalink::interfaces()[0];
+        let target_mac = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
         let opcodes = [
             SdcpOpCode::DiscoverRes,
             SdcpOpCode::GetIpRes,
@@ -570,18 +426,10 @@ mod tests {
             let mut sender = MockDataLinkSender::new();
             let tlv = Tlv::status_report(StatusCode::NoError);
 
-            send_response(
-                &mut sender,
-                interface,
-                MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF),
-                *opcode,
-                0x0001,
-                tlv,
-            );
+            send_response(&mut sender, interface, target_mac, *opcode, 0x0001, tlv);
 
-            let sent = sender.get_sent_packets();
             assert!(
-                !sent.is_empty(),
+                !sender.get_sent_packets().is_empty(),
                 "Packet should have been sent for opcode {opcode:?}"
             );
         }
@@ -589,18 +437,15 @@ mod tests {
 
     #[test]
     fn test_device_info_persistence_across_operations() {
-        let device_info = Arc::new(MockDeviceInfoAccess::new());
+        let device_info = Arc::new(MockDeviceInfo::new(TEST_MAC));
 
-        // Initial state
         let initial = device_info.read_device_info();
         assert_eq!(initial.vendor_id, 0x1234);
 
-        // Simulate IP update
         let mut updated = initial;
         updated.ip_address = vec![10, 0, 0, 1];
         device_info.write_device_info(updated);
 
-        // Verify persistence
         let persisted = device_info.read_device_info();
         assert_eq!(persisted.ip_address, vec![10, 0, 0, 1]);
         assert_eq!(

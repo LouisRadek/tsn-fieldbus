@@ -3,6 +3,10 @@ name = "common"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+test-utils = []
+
 [dependencies]
 # Serialization and Error handling
 serde = { version = "1.0", features = ["derive"] }

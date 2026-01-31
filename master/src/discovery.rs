@@ -464,90 +464,46 @@ fn process_discover_frame(
 
 #[cfg(test)]
 mod tests {
-    use common::discovery_types::DeviceInfo;
+    use common::test_mocks::{
+        MockDataLinkReceiver, MockDataLinkSender, TEST_MAC, create_mock_interface,
+    };
 
     use super::*;
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
 
-    struct MockDataLinkSender {
-        sent_frames: Mutex<Vec<Vec<u8>>>,
-    }
+    const SLAVE_MAC: MacAddr = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
+    const SLAVE2_MAC: MacAddr = MacAddr(0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC);
+    const VENDOR_ID: u16 = 0x1234;
+    const DEVICE_ID: u16 = 0x5678;
+    const SERIAL_NUMBER: u32 = 0xDEADBEEF;
+    const DEFAULT_IP: [u8; 4] = [192, 168, 1, 100];
+    const DEFAULT_NETMASK: [u8; 4] = [255, 255, 255, 0];
+    const DEFAULT_GATEWAY: [u8; 4] = [192, 168, 1, 1];
+    const TEST_TIMEOUT: Duration = Duration::from_millis(100);
+    const SHORT_TIMEOUT: Duration = Duration::from_millis(50);
 
-    impl MockDataLinkSender {
-        fn new() -> Self {
-            Self {
-                sent_frames: Mutex::new(Vec::new()),
-            }
+    fn build_sdcp_frame(
+        source_mac: MacAddr,
+        dest_mac: MacAddr,
+        transaction_id: u16,
+        op_code: SdcpOpCode,
+        tlv: Option<Tlv>,
+    ) -> Vec<u8> {
+        let mut frame = vec![0u8; 64];
+
+        frame[0..6].copy_from_slice(&dest_mac.octets());
+        frame[6..12].copy_from_slice(&source_mac.octets());
+        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
+
+        let mut sdcp_payload = Vec::new();
+        let header = SdcpHeader::new(op_code, transaction_id);
+        header.write_to(&mut sdcp_payload).unwrap();
+
+        if let Some(tlv) = tlv {
+            tlv.write_to(&mut sdcp_payload).unwrap();
         }
 
-        #[allow(dead_code)]
-        fn get_sent_frames(&self) -> Vec<Vec<u8>> {
-            self.sent_frames.lock().unwrap().clone()
-        }
-    }
-
-    impl DataLinkSender for MockDataLinkSender {
-        fn send_to(
-            &mut self,
-            packet: &[u8],
-            _dst: Option<NetworkInterface>,
-        ) -> Option<Result<(), io::Error>> {
-            self.sent_frames.lock().unwrap().push(packet.to_vec());
-            Some(Ok(()))
-        }
-
-        fn build_and_send(
-            &mut self,
-            _num_packets: usize,
-            _packet_size: usize,
-            _func: &mut dyn FnMut(&mut [u8]),
-        ) -> Option<Result<(), io::Error>> {
-            Some(Ok(()))
-        }
-    }
-
-    struct MockDataLinkReceiver {
-        frames: Mutex<VecDeque<Vec<u8>>>,
-        current_frame: Vec<u8>,
-    }
-
-    impl MockDataLinkReceiver {
-        fn new() -> Self {
-            Self {
-                frames: Mutex::new(VecDeque::new()),
-                current_frame: Vec::new(),
-            }
-        }
-
-        fn add_response_frame(&self, frame: Vec<u8>) {
-            self.frames.lock().unwrap().push_back(frame);
-        }
-    }
-
-    impl DataLinkReceiver for MockDataLinkReceiver {
-        fn next(&mut self) -> Result<&[u8], io::Error> {
-            if let Some(frame) = self.frames.lock().unwrap().pop_front() {
-                self.current_frame = frame;
-                Ok(&self.current_frame)
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "No frames available",
-                ))
-            }
-        }
-    }
-
-    fn create_mock_interface() -> NetworkInterface {
-        NetworkInterface {
-            name: "mock0".to_string(),
-            description: "Mock interface".to_string(),
-            index: 0,
-            mac: Some(MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF)),
-            ips: vec![],
-            flags: 0,
-        }
+        frame[14..14 + sdcp_payload.len()].copy_from_slice(&sdcp_payload);
+        frame
     }
 
     fn create_discovery_response(
@@ -558,21 +514,14 @@ mod tests {
         device_id: u16,
         serial_number: u32,
     ) -> Vec<u8> {
-        let mut frame = vec![0u8; 64];
-
-        frame[0..6].copy_from_slice(&dest_mac.octets());
-        frame[6..12].copy_from_slice(&source_mac.octets());
-        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
-
-        let mut sdcp_payload = Vec::new();
-        let header = SdcpHeader::new(SdcpOpCode::DiscoverRes, transaction_id);
-        header.write_to(&mut sdcp_payload).unwrap();
-
         let tlv = Tlv::device_info(vendor_id, device_id, serial_number);
-        tlv.write_to(&mut sdcp_payload).unwrap();
-
-        frame[14..14 + sdcp_payload.len()].copy_from_slice(&sdcp_payload);
-        frame
+        build_sdcp_frame(
+            source_mac,
+            dest_mac,
+            transaction_id,
+            SdcpOpCode::DiscoverRes,
+            Some(tlv),
+        )
     }
 
     fn create_get_ip_response(
@@ -584,21 +533,14 @@ mod tests {
         gateway: [u8; 4],
         ip_source: common::slave_api::IpSource,
     ) -> Vec<u8> {
-        let mut frame = vec![0u8; 64];
-
-        frame[0..6].copy_from_slice(&dest_mac.octets());
-        frame[6..12].copy_from_slice(&source_mac.octets());
-        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
-
-        let mut sdcp_payload = Vec::new();
-        let header = SdcpHeader::new(SdcpOpCode::GetIpRes, transaction_id);
-        header.write_to(&mut sdcp_payload).unwrap();
-
         let tlv = Tlv::ip_report(ip, netmask, gateway, ip_source);
-        tlv.write_to(&mut sdcp_payload).unwrap();
-
-        frame[14..14 + sdcp_payload.len()].copy_from_slice(&sdcp_payload);
-        frame
+        build_sdcp_frame(
+            source_mac,
+            dest_mac,
+            transaction_id,
+            SdcpOpCode::GetIpRes,
+            Some(tlv),
+        )
     }
 
     fn create_set_ip_response(
@@ -607,220 +549,153 @@ mod tests {
         transaction_id: u16,
         status: StatusCode,
     ) -> Vec<u8> {
-        let mut frame = vec![0u8; 64];
-
-        frame[0..6].copy_from_slice(&dest_mac.octets());
-        frame[6..12].copy_from_slice(&source_mac.octets());
-        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
-
-        let mut sdcp_payload = Vec::new();
-        let header = SdcpHeader::new(SdcpOpCode::SetIpRes, transaction_id);
-        header.write_to(&mut sdcp_payload).unwrap();
-
         let tlv = Tlv::status_report(status);
-        tlv.write_to(&mut sdcp_payload).unwrap();
-
-        frame[14..14 + sdcp_payload.len()].copy_from_slice(&sdcp_payload);
-        frame
+        build_sdcp_frame(
+            source_mac,
+            dest_mac,
+            transaction_id,
+            SdcpOpCode::SetIpRes,
+            Some(tlv),
+        )
     }
 
-    #[test]
-    fn test_discovered_device_creation() {
-        let mac = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
-        let device_info = DeviceInfo {
-            vendor_id: 0x1234,
-            device_id: 0x5678,
-            serial_number: 0xDEADBEEF,
-        };
-
-        let device = DiscoveredDevice::new(mac, device_info);
-
-        assert_eq!(device.mac_address, mac);
-        assert_eq!(device.vendor_id, 0x1234);
-        assert_eq!(device.device_id, 0x5678);
-        assert_eq!(device.serial_number, 0xDEADBEEF);
+    fn create_test_master() -> DiscoveryMaster {
+        let interface = create_mock_interface("mock0", TEST_MAC);
+        let sender = MockDataLinkSender::new();
+        let receiver = MockDataLinkReceiver::new();
+        DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver))
     }
 
-    #[test]
-    fn test_discovery_error_display() {
-        let err = DiscoveryError::InterfaceNotFound("eth0".to_string());
-        assert!(err.to_string().contains("eth0"));
+    fn create_test_master_with_responses(responses: Vec<Vec<u8>>) -> DiscoveryMaster {
+        let interface = create_mock_interface("mock0", TEST_MAC);
+        let sender = MockDataLinkSender::new();
+        let receiver = MockDataLinkReceiver::new();
 
-        let err = DiscoveryError::Timeout;
-        assert!(err.to_string().contains("Timeout"));
+        for response in responses {
+            receiver.add_response_frame(response);
+        }
 
-        let err = DiscoveryError::DeviceError(StatusCode::IpConflict);
-        assert!(err.to_string().contains("IP Conflict"));
+        DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver))
+    }
+
+    fn default_discovery_response() -> Vec<u8> {
+        create_discovery_response(SLAVE_MAC, TEST_MAC, 1, VENDOR_ID, DEVICE_ID, SERIAL_NUMBER)
+    }
+
+    fn default_get_ip_response() -> Vec<u8> {
+        create_get_ip_response(
+            SLAVE_MAC,
+            TEST_MAC,
+            1,
+            DEFAULT_IP,
+            DEFAULT_NETMASK,
+            DEFAULT_GATEWAY,
+            common::slave_api::IpSource::Manuell,
+        )
+    }
+
+    fn default_set_ip_response(status: StatusCode) -> Vec<u8> {
+        create_set_ip_response(SLAVE_MAC, TEST_MAC, 1, status)
+    }
+
+    fn assert_device_error(result: Result<(), DiscoveryError>, expected_status: StatusCode) {
+        match result {
+            Err(DiscoveryError::DeviceError(status)) => {
+                assert_eq!(status, expected_status);
+            }
+            _ => panic!("Expected DeviceError with {:?} status", expected_status),
+        }
     }
 
     #[test]
     fn test_process_discover_frame_valid() {
-        let mut frame = vec![0u8; 64];
-        let source_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
+        let frame = default_discovery_response();
+        let device = process_discover_frame(&frame, 1).expect("Should parse valid frame");
 
-        frame[0..6].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
-
-        let transaction_id: u16 = 0x0001;
-        let mut sdcp_payload = Vec::new();
-        let header = SdcpHeader::new(SdcpOpCode::DiscoverRes, transaction_id);
-        header.write_to(&mut sdcp_payload).unwrap();
-
-        let tlv = Tlv::device_info(0x1234, 0x5678, 0xDEADBEEF);
-        tlv.write_to(&mut sdcp_payload).unwrap();
-
-        frame[14..14 + sdcp_payload.len()].copy_from_slice(&sdcp_payload);
-
-        let device = process_discover_frame(&frame, transaction_id);
-        assert!(device.is_some());
-
-        let device = device.unwrap();
-        assert_eq!(device.mac_address, source_mac);
-        assert_eq!(device.vendor_id, 0x1234);
-        assert_eq!(device.device_id, 0x5678);
-        assert_eq!(device.serial_number, 0xDEADBEEF);
+        assert_eq!(device.mac_address, SLAVE_MAC);
+        assert_eq!(device.vendor_id, VENDOR_ID);
+        assert_eq!(device.device_id, DEVICE_ID);
+        assert_eq!(device.serial_number, SERIAL_NUMBER);
     }
 
     #[test]
     fn test_process_discover_frame_wrong_transaction_id() {
-        let mut frame = vec![0u8; 64];
-
-        frame[0..6].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
-
-        let mut sdcp_payload = Vec::new();
-        let header = SdcpHeader::new(SdcpOpCode::DiscoverRes, 0x9999);
-        header.write_to(&mut sdcp_payload).unwrap();
-
-        let tlv = Tlv::device_info(0x1234, 0x5678, 0xDEADBEEF);
-        tlv.write_to(&mut sdcp_payload).unwrap();
-
-        frame[14..14 + sdcp_payload.len()].copy_from_slice(&sdcp_payload);
-
-        let device = process_discover_frame(&frame, 0x0001);
-        assert!(device.is_none());
+        let frame = create_discovery_response(
+            SLAVE_MAC,
+            TEST_MAC,
+            0x9999,
+            VENDOR_ID,
+            DEVICE_ID,
+            SERIAL_NUMBER,
+        );
+        assert!(process_discover_frame(&frame, 1).is_none());
     }
 
     #[test]
     fn test_process_discover_frame_wrong_opcode() {
-        let mut frame = vec![0u8; 64];
-
-        frame[0..6].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
-
-        let mut sdcp_payload = Vec::new();
-        let header = SdcpHeader::new(SdcpOpCode::DiscoverReq, 0x0001);
-        header.write_to(&mut sdcp_payload).unwrap();
-
-        frame[14..14 + sdcp_payload.len()].copy_from_slice(&sdcp_payload);
-
-        let device = process_discover_frame(&frame, 0x0001);
-        assert!(device.is_none());
+        let frame = build_sdcp_frame(SLAVE_MAC, TEST_MAC, 1, SdcpOpCode::DiscoverReq, None);
+        assert!(process_discover_frame(&frame, 1).is_none());
     }
 
     #[test]
     fn test_process_discover_frame_wrong_ethertype() {
         let mut frame = vec![0u8; 64];
-
-        frame[0..6].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        frame[0..6].copy_from_slice(&SLAVE_MAC.octets());
+        frame[6..12].copy_from_slice(&TEST_MAC.octets());
         frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
 
-        let device = process_discover_frame(&frame, 0x0001);
-        assert!(device.is_none());
-    }
-
-    #[test]
-    fn test_transaction_id_generation() {
-        let counter = AtomicU16::new(1);
-
-        let id1 = counter.fetch_add(1, Ordering::Relaxed);
-        let id2 = counter.fetch_add(1, Ordering::Relaxed);
-        let id3 = counter.fetch_add(1, Ordering::Relaxed);
-
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
-        assert_eq!(id3, 3);
+        assert!(process_discover_frame(&frame, 1).is_none());
     }
 
     #[test]
     fn test_discover_devices_with_single_response() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
+        let mut master = create_test_master_with_responses(vec![default_discovery_response()]);
 
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-        let response =
-            create_discovery_response(slave_mac, master_mac, 1, 0x1234, 0x5678, 0xDEADBEEF);
-        receiver.add_response_frame(response);
-
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
-
-        let devices = master
-            .discover_devices(Some(Duration::from_millis(100)))
-            .unwrap();
+        let devices = master.discover_devices(Some(TEST_TIMEOUT)).unwrap();
 
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].mac_address, slave_mac);
-        assert_eq!(devices[0].vendor_id, 0x1234);
-        assert_eq!(devices[0].device_id, 0x5678);
-        assert_eq!(devices[0].serial_number, 0xDEADBEEF);
-
-        assert_eq!(master.discovered_devices().len(), 1);
-        assert!(master.discovered_devices().contains_key(&slave_mac));
+        assert_eq!(devices[0].mac_address, SLAVE_MAC);
+        assert_eq!(devices[0].vendor_id, VENDOR_ID);
+        assert_eq!(devices[0].device_id, DEVICE_ID);
+        assert_eq!(devices[0].serial_number, SERIAL_NUMBER);
+        assert!(master.discovered_devices().contains_key(&SLAVE_MAC));
     }
 
     #[test]
     fn test_discover_devices_with_multiple_responses() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
+        let responses = vec![
+            create_discovery_response(SLAVE_MAC, TEST_MAC, 1, 0x1111, 0x2222, 0x11111111),
+            create_discovery_response(SLAVE2_MAC, TEST_MAC, 1, 0x3333, 0x4444, 0x22222222),
+        ];
+        let mut master = create_test_master_with_responses(responses);
 
-        let slave1_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-        let slave2_mac = MacAddr(0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC);
-
-        receiver.add_response_frame(create_discovery_response(
-            slave1_mac, master_mac, 1, 0x1111, 0x2222, 0x11111111,
-        ));
-        receiver.add_response_frame(create_discovery_response(
-            slave2_mac, master_mac, 1, 0x3333, 0x4444, 0x22222222,
-        ));
-
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
-
-        let devices = master
-            .discover_devices(Some(Duration::from_millis(100)))
-            .unwrap();
+        let devices = master.discover_devices(Some(TEST_TIMEOUT)).unwrap();
 
         assert_eq!(devices.len(), 2);
         assert_eq!(master.discovered_devices().len(), 2);
-
-        let device1 = master.discovered_devices().get(&slave1_mac).unwrap();
-        assert_eq!(device1.vendor_id, 0x1111);
-
-        let device2 = master.discovered_devices().get(&slave2_mac).unwrap();
-        assert_eq!(device2.vendor_id, 0x3333);
+        assert_eq!(
+            master
+                .discovered_devices()
+                .get(&SLAVE_MAC)
+                .unwrap()
+                .vendor_id,
+            0x1111
+        );
+        assert_eq!(
+            master
+                .discovered_devices()
+                .get(&SLAVE2_MAC)
+                .unwrap()
+                .vendor_id,
+            0x3333
+        );
     }
 
     #[test]
     fn test_discover_devices_no_responses() {
-        let interface = create_mock_interface();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
+        let mut master = create_test_master();
 
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
-
-        let devices = master
-            .discover_devices(Some(Duration::from_millis(100)))
-            .unwrap();
+        let devices = master.discover_devices(Some(TEST_TIMEOUT)).unwrap();
 
         assert!(devices.is_empty());
         assert!(master.discovered_devices().is_empty());
@@ -828,151 +703,74 @@ mod tests {
 
     #[test]
     fn test_discover_devices_ignores_wrong_transaction_id() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
-
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
         // Response with wrong transaction ID (99 instead of 1)
-        receiver.add_response_frame(create_discovery_response(
-            slave_mac, master_mac, 99, 0x1234, 0x5678, 0xDEADBEEF,
-        ));
+        let response =
+            create_discovery_response(SLAVE_MAC, TEST_MAC, 99, VENDOR_ID, DEVICE_ID, SERIAL_NUMBER);
+        let mut master = create_test_master_with_responses(vec![response]);
 
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
-
-        let devices = master
-            .discover_devices(Some(Duration::from_millis(100)))
-            .unwrap();
+        let devices = master.discover_devices(Some(TEST_TIMEOUT)).unwrap();
 
         assert!(devices.is_empty());
     }
 
     #[test]
     fn test_discover_devices_sends_broadcast_frame() {
-        let interface = create_mock_interface();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
+        let mut master = create_test_master();
 
-        let mut master = DiscoveryMaster::new_with_mocks(
-            interface.clone(),
-            Box::new(sender),
-            Box::new(receiver),
-        );
-
-        let _ = master.discover_devices(Some(Duration::from_millis(50)));
-
-        // Test verifies that discover_devices executes without panic
-        // The actual frame validation would require accessing the mock's internal state
-        let _sent = master.transmitter.build_and_send(0, 0, &mut |_| {});
+        let _ = master.discover_devices(Some(SHORT_TIMEOUT));
     }
 
     #[test]
     fn test_get_ip_config_success() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
+        let mut master = create_test_master_with_responses(vec![default_get_ip_response()]);
 
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-        let expected_ip = [192, 168, 1, 100];
-        let expected_netmask = [255, 255, 255, 0];
-        let expected_gateway = [192, 168, 1, 1];
+        let ip_report = master.get_ip_config(SLAVE_MAC, Some(TEST_TIMEOUT)).unwrap();
 
-        receiver.add_response_frame(create_get_ip_response(
-            slave_mac,
-            master_mac,
-            1,
-            expected_ip,
-            expected_netmask,
-            expected_gateway,
-            common::slave_api::IpSource::Manuell,
-        ));
-
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
-
-        let ip_report = master
-            .get_ip_config(slave_mac, Some(Duration::from_millis(100)))
-            .unwrap();
-
-        assert_eq!(ip_report.ip, expected_ip);
-        assert_eq!(ip_report.netmask, expected_netmask);
-        assert_eq!(ip_report.gateway, expected_gateway);
+        assert_eq!(ip_report.ip, DEFAULT_IP);
+        assert_eq!(ip_report.netmask, DEFAULT_NETMASK);
+        assert_eq!(ip_report.gateway, DEFAULT_GATEWAY);
         assert_eq!(ip_report.ip_source, common::slave_api::IpSource::Manuell);
     }
 
     #[test]
     fn test_get_ip_config_timeout() {
-        let interface = create_mock_interface();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
+        let mut master = create_test_master();
 
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
-
-        let result = master.get_ip_config(slave_mac, Some(Duration::from_millis(50)));
+        let result = master.get_ip_config(SLAVE_MAC, Some(SHORT_TIMEOUT));
 
         assert!(matches!(result, Err(DiscoveryError::Timeout)));
     }
 
     #[test]
     fn test_get_ip_config_wrong_source_mac() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
-
-        let target_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
         let wrong_source_mac = MacAddr(0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA);
-
-        // Response from a different MAC address
-        receiver.add_response_frame(create_get_ip_response(
+        let response = create_get_ip_response(
             wrong_source_mac,
-            master_mac,
+            TEST_MAC,
             1,
-            [192, 168, 1, 100],
-            [255, 255, 255, 0],
-            [192, 168, 1, 1],
+            DEFAULT_IP,
+            DEFAULT_NETMASK,
+            DEFAULT_GATEWAY,
             common::slave_api::IpSource::Manuell,
-        ));
+        );
+        let mut master = create_test_master_with_responses(vec![response]);
 
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
-
-        let result = master.get_ip_config(target_mac, Some(Duration::from_millis(50)));
+        let result = master.get_ip_config(SLAVE_MAC, Some(SHORT_TIMEOUT));
 
         assert!(matches!(result, Err(DiscoveryError::Timeout)));
     }
 
     #[test]
     fn test_set_ip_config_success() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
-
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-
-        receiver.add_response_frame(create_set_ip_response(
-            slave_mac,
-            master_mac,
-            1,
-            StatusCode::NoError,
-        ));
-
         let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
+            create_test_master_with_responses(vec![default_set_ip_response(StatusCode::NoError)]);
 
         let result = master.set_ip_config(
-            slave_mac,
+            SLAVE_MAC,
             [10, 0, 0, 50],
-            [255, 255, 255, 0],
+            DEFAULT_NETMASK,
             [10, 0, 0, 1],
-            Some(Duration::from_millis(100)),
+            Some(TEST_TIMEOUT),
         );
 
         assert!(result.is_ok());
@@ -980,56 +778,31 @@ mod tests {
 
     #[test]
     fn test_set_ip_config_ip_conflict() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
-
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-
-        receiver.add_response_frame(create_set_ip_response(
-            slave_mac,
-            master_mac,
-            1,
+        let mut master = create_test_master_with_responses(vec![default_set_ip_response(
             StatusCode::IpConflict,
-        ));
-
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
+        )]);
 
         let result = master.set_ip_config(
-            slave_mac,
+            SLAVE_MAC,
             [10, 0, 0, 50],
-            [255, 255, 255, 0],
+            DEFAULT_NETMASK,
             [10, 0, 0, 1],
-            Some(Duration::from_millis(100)),
+            Some(TEST_TIMEOUT),
         );
 
-        match result {
-            Err(DiscoveryError::DeviceError(status)) => {
-                assert_eq!(status, StatusCode::IpConflict);
-            }
-            _ => panic!("Expected DeviceError with IpConflict status"),
-        }
+        assert_device_error(result, StatusCode::IpConflict);
     }
 
     #[test]
     fn test_set_ip_config_timeout() {
-        let interface = create_mock_interface();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
-
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
+        let mut master = create_test_master();
 
         let result = master.set_ip_config(
-            slave_mac,
+            SLAVE_MAC,
             [10, 0, 0, 50],
-            [255, 255, 255, 0],
+            DEFAULT_NETMASK,
             [10, 0, 0, 1],
-            Some(Duration::from_millis(50)),
+            Some(SHORT_TIMEOUT),
         );
 
         assert!(matches!(result, Err(DiscoveryError::Timeout)));
@@ -1037,55 +810,25 @@ mod tests {
 
     #[test]
     fn test_set_ip_config_os_failure() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
-
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-
-        receiver.add_response_frame(create_set_ip_response(
-            slave_mac,
-            master_mac,
-            1,
-            StatusCode::OsFailure,
-        ));
-
         let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
+            create_test_master_with_responses(vec![default_set_ip_response(StatusCode::OsFailure)]);
 
         let result = master.set_ip_config(
-            slave_mac,
+            SLAVE_MAC,
             [10, 0, 0, 50],
-            [255, 255, 255, 0],
+            DEFAULT_NETMASK,
             [10, 0, 0, 1],
-            Some(Duration::from_millis(100)),
+            Some(TEST_TIMEOUT),
         );
 
-        match result {
-            Err(DiscoveryError::DeviceError(status)) => {
-                assert_eq!(status, StatusCode::OsFailure);
-            }
-            _ => panic!("Expected DeviceError with OsFailure status"),
-        }
+        assert_device_error(result, StatusCode::OsFailure);
     }
 
     #[test]
     fn test_clear_discovered_devices() {
-        let interface = create_mock_interface();
-        let master_mac = interface.mac.unwrap();
-        let sender = MockDataLinkSender::new();
-        let receiver = MockDataLinkReceiver::new();
+        let mut master = create_test_master_with_responses(vec![default_discovery_response()]);
 
-        let slave_mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-        receiver.add_response_frame(create_discovery_response(
-            slave_mac, master_mac, 1, 0x1234, 0x5678, 0xDEADBEEF,
-        ));
-
-        let mut master =
-            DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver));
-
-        let _ = master.discover_devices(Some(Duration::from_millis(100)));
+        let _ = master.discover_devices(Some(TEST_TIMEOUT));
         assert_eq!(master.discovered_devices().len(), 1);
 
         master.clear_discovered_devices();

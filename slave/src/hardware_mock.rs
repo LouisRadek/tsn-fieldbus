@@ -6,10 +6,11 @@
 //! the `ProcessImageAccess` and `DeviceInfoAccess` traits to provide access
 //! to process variables and device information respectively.
 
-use common::slave_api::{DataType, DeviceInfo, IpSource, ProcessVariable, VariableDirection};
+use common::{
+    hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess, ProcessImageAccess},
+    slave_api::{DataType, DeviceInfo, IpSource, ProcessVariable, VariableDirection},
+};
 use std::sync::{Arc, RwLock};
-
-use crate::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess, ProcessImageAccess};
 
 /// Mock thread-safe hardware implementation for testing.
 /// Simulates:
@@ -171,6 +172,35 @@ mod tests {
     use super::*;
     use std::thread;
 
+    const EXPECTED_VENDOR_ID: u32 = 42;
+    const EXPECTED_DEVICE_ID: u32 = 42;
+    const EXPECTED_SERIAL: u32 = 0x12345678;
+    const EXPECTED_MAC: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
+    const EXPECTED_FIRMWARE_VERSION: u32 = 1;
+
+    fn assert_sensor_bytes(hw: &DummyHardware, expected_high: u8, expected_low: u8) {
+        let inputs = hw.read_inputs();
+        assert_eq!(inputs[0], expected_high, "High byte mismatch");
+        assert_eq!(inputs[1], expected_low, "Low byte mismatch");
+    }
+
+    fn run_concurrent<F>(hw: Arc<DummyHardware>, thread_count: usize, task: F)
+    where
+        F: Fn(Arc<DummyHardware>) + Send + Sync + Clone + 'static,
+    {
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                let hw_clone = Arc::clone(&hw);
+                let task_clone = task.clone();
+                thread::spawn(move || task_clone(hw_clone))
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
     #[test]
     fn test_initialization() {
         let hw = DummyHardware::new();
@@ -178,65 +208,57 @@ mod tests {
         let inputs = hw.read_inputs();
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs, vec![0, 0]);
-
         assert!(!hw.get_led_status());
+    }
+
+    #[test]
+    fn test_device_info_initialization() {
+        let hw = DummyHardware::new();
+        let info = hw.read_device_info();
+
+        assert_eq!(info.vendor_id, EXPECTED_VENDOR_ID);
+        assert_eq!(info.device_id, EXPECTED_DEVICE_ID);
+        assert_eq!(info.serial_number, EXPECTED_SERIAL);
+        assert_eq!(info.mac_address, EXPECTED_MAC.to_vec());
+        assert_eq!(info.firmware_version, EXPECTED_FIRMWARE_VERSION);
+        assert_eq!(info.capabilities, 0);
     }
 
     #[test]
     fn test_simulate_sensor_change() {
         let hw = DummyHardware::new();
 
-        // Test positive temperature
+        // Test positive temperature (1000 = 0x03E8)
         hw.simulate_sensor_change(1000);
-        let inputs = hw.read_inputs();
-        assert_eq!(inputs[0], 0x03, "High byte of 1000 should be 0x03");
-        assert_eq!(inputs[1], 0xE8, "Low byte of 1000 should be 0xE8");
+        assert_sensor_bytes(&hw, 0x03, 0xE8);
 
         // Test negative temperature (two's complement)
         hw.simulate_sensor_change(-1);
-        let inputs = hw.read_inputs();
-        assert_eq!(inputs[0], 0xFF, "High byte of -1 should be 0xFF");
-        assert_eq!(inputs[1], 0xFF, "Low byte of -1 should be 0xFF");
+        assert_sensor_bytes(&hw, 0xFF, 0xFF);
 
         // Test zero
         hw.simulate_sensor_change(0);
-        let inputs = hw.read_inputs();
-        assert_eq!(inputs, vec![0, 0]);
+        assert_sensor_bytes(&hw, 0x00, 0x00);
     }
 
     #[test]
-    fn test_get_layout() {
+    fn test_boundary_temperatures() {
         let hw = DummyHardware::new();
-        let layout = hw.get_layout();
 
-        assert_eq!(layout.len(), 2);
+        hw.simulate_sensor_change(i16::MAX);
+        assert_sensor_bytes(&hw, 0x7F, 0xFF);
 
-        // Check Temperature (Input)
-        let temp = &layout[0];
-        assert_eq!(temp.name, "Temperature");
-        assert_eq!(temp.byte_offset, 0);
-        assert_eq!(temp.bit_offset, 0);
-        assert_eq!(temp.bit_len, 16);
-        assert_eq!(temp.direction, 0);
-
-        // Check Status_LED (Output)
-        let led = &layout[1];
-        assert_eq!(led.name, "Status_LED");
-        assert_eq!(led.byte_offset, 2);
-        assert_eq!(led.bit_offset, 0);
-        assert_eq!(led.bit_len, 1);
-        assert_eq!(led.direction, 1);
+        hw.simulate_sensor_change(i16::MIN);
+        assert_sensor_bytes(&hw, 0x80, 0x00);
     }
 
     #[test]
     fn test_write_outputs_single_byte() {
         let mut hw = DummyHardware::new();
 
-        // Write LED on
         hw.write_outputs(&[0x01]);
         assert!(hw.get_led_status());
 
-        // Write LED off
         hw.write_outputs(&[0x00]);
         assert!(!hw.get_led_status());
     }
@@ -245,15 +267,14 @@ mod tests {
     fn test_write_outputs_multiple_bits() {
         let mut hw = DummyHardware::new();
 
-        // Write all bits set
         hw.write_outputs(&[0xFF]);
         assert!(hw.get_led_status());
 
-        // Write bit 1 set, bit 0 clear
+        // Bit 1 set, bit 0 clear
         hw.write_outputs(&[0x02]);
         assert!(!hw.get_led_status());
 
-        // Write all bits set except bit 0
+        // All bits set except bit 0
         hw.write_outputs(&[0xFE]);
         assert!(!hw.get_led_status());
     }
@@ -275,59 +296,36 @@ mod tests {
     }
 
     #[test]
+    fn test_get_layout() {
+        let hw = DummyHardware::new();
+        let layout = hw.get_layout();
+
+        assert_eq!(layout.len(), 2);
+
+        let temp = &layout[0];
+        assert_eq!(temp.name, "Temperature");
+        assert_eq!(temp.byte_offset, 0);
+        assert_eq!(temp.bit_len, 16);
+        assert_eq!(temp.direction, VariableDirection::Input as i32);
+
+        let led = &layout[1];
+        assert_eq!(led.name, "Status_LED");
+        assert_eq!(led.byte_offset, 2);
+        assert_eq!(led.bit_len, 1);
+        assert_eq!(led.direction, VariableDirection::Output as i32);
+    }
+
+    #[test]
     fn test_sensor_and_led_independent() {
         let mut hw = DummyHardware::new();
 
-        // Change sensor
         hw.simulate_sensor_change(500);
-        assert_eq!(hw.read_inputs(), vec![0x01, 0xF4]);
-
-        // LED should still be off
+        assert_sensor_bytes(&hw, 0x01, 0xF4);
         assert!(!hw.get_led_status());
 
-        // Change LED
         hw.write_outputs(&[0x01]);
         assert!(hw.get_led_status());
-
-        // Sensor should still be the same
-        assert_eq!(hw.read_inputs(), vec![0x01, 0xF4]);
-    }
-
-    #[test]
-    fn test_boundary_temperatures() {
-        let hw = DummyHardware::new();
-
-        hw.simulate_sensor_change(i16::MAX);
-        let inputs = hw.read_inputs();
-        assert_eq!(inputs[0], 0x7F);
-        assert_eq!(inputs[1], 0xFF);
-
-        hw.simulate_sensor_change(i16::MIN);
-        let inputs = hw.read_inputs();
-        assert_eq!(inputs[0], 0x80);
-        assert_eq!(inputs[1], 0x00);
-    }
-
-    #[test]
-    fn test_concurrent_reads() {
-        let hw = Arc::new(DummyHardware::new());
-        hw.simulate_sensor_change(42);
-
-        let mut handles = vec![];
-
-        for _ in 0..5 {
-            let hw_clone = Arc::clone(&hw);
-            let handle = thread::spawn(move || {
-                let inputs = hw_clone.read_inputs();
-                assert_eq!(inputs[0], 0x00);
-                assert_eq!(inputs[1], 0x2A);
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
+        assert_sensor_bytes(&hw, 0x01, 0xF4);
     }
 
     #[test]
@@ -336,44 +334,10 @@ mod tests {
 
         hw.simulate_sensor_change(256);
         let inputs = hw.read_inputs();
-
         hw.write_outputs(&inputs);
 
         assert_eq!(inputs[0], 0x01);
         assert!(hw.get_led_status());
-    }
-
-    #[test]
-    fn test_device_info_initialization() {
-        let hw = DummyHardware::new();
-        let info = hw.read_device_info();
-
-        assert_eq!(info.vendor_id, 42);
-        assert_eq!(info.device_id, 42);
-        assert_eq!(info.serial_number, 0x12345678);
-        assert_eq!(info.mac_address, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        assert_eq!(info.firmware_version, 1);
-        assert_eq!(info.capabilities, 0);
-    }
-
-    #[test]
-    fn test_concurrent_device_info_reads() {
-        let hw = Arc::new(DummyHardware::new());
-        let mut handles = vec![];
-
-        for _ in 0..5 {
-            let hw_clone = Arc::clone(&hw);
-            let handle = thread::spawn(move || {
-                let info = hw_clone.read_device_info();
-                assert_eq!(info.serial_number, 0x12345678);
-                assert_eq!(info.mac_address, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
     }
 
     #[test]
@@ -384,42 +348,60 @@ mod tests {
         new_info.ip_address = vec![192, 168, 1, 100];
         new_info.netmask = vec![255, 255, 255, 0];
         new_info.gateway = vec![192, 168, 1, 1];
-
         hw.write_device_info(new_info);
 
-        let updated_info = hw.read_device_info();
-        assert_eq!(updated_info.ip_address, vec![192, 168, 1, 100]);
-        assert_eq!(updated_info.netmask, vec![255, 255, 255, 0]);
-        assert_eq!(updated_info.gateway, vec![192, 168, 1, 1]);
+        let updated = hw.read_device_info();
+        assert_eq!(updated.ip_address, vec![192, 168, 1, 100]);
+        assert_eq!(updated.netmask, vec![255, 255, 255, 0]);
+        assert_eq!(updated.gateway, vec![192, 168, 1, 1]);
+    }
+
+    #[test]
+    fn test_concurrent_reads() {
+        let hw = Arc::new(DummyHardware::new());
+        hw.simulate_sensor_change(42);
+
+        run_concurrent(hw, 5, |hw| {
+            let inputs = hw.read_inputs();
+            assert_eq!(inputs, vec![0x00, 0x2A]);
+        });
+    }
+
+    #[test]
+    fn test_concurrent_device_info_reads() {
+        let hw = Arc::new(DummyHardware::new());
+
+        run_concurrent(hw, 5, |hw| {
+            let info = hw.read_device_info();
+            assert_eq!(info.serial_number, EXPECTED_SERIAL);
+            assert_eq!(info.mac_address, EXPECTED_MAC.to_vec());
+        });
     }
 
     #[test]
     fn test_concurrent_device_info_write_read() {
         let hw = Arc::new(DummyHardware::new());
-        let mut handles = vec![];
 
-        // Writer threads
-        for i in 0..3 {
-            let hw_clone = Arc::clone(&hw);
-            let handle = thread::spawn(move || {
-                let mut info = hw_clone.read_device_info();
-                info.ip_address = vec![10, 0, 0, i];
-                hw_clone.write_device_info(info);
-            });
-            handles.push(handle);
-        }
+        // Writers
+        let hw_clone = Arc::clone(&hw);
+        let writers: Vec<_> = (0..3u8)
+            .map(|i| {
+                let hw = Arc::clone(&hw_clone);
+                thread::spawn(move || {
+                    let mut info = hw.read_device_info();
+                    info.ip_address = vec![10, 0, 0, i];
+                    hw.write_device_info(info);
+                })
+            })
+            .collect();
 
-        // Reader threads
-        for _ in 0..3 {
-            let hw_clone = Arc::clone(&hw);
-            let handle = thread::spawn(move || {
-                let info = hw_clone.read_device_info();
-                assert!(info.ip_address.len() == 4);
-            });
-            handles.push(handle);
-        }
+        // Readers
+        run_concurrent(hw, 3, |hw| {
+            let info = hw.read_device_info();
+            assert_eq!(info.ip_address.len(), 4);
+        });
 
-        for handle in handles {
+        for handle in writers {
             handle.join().unwrap();
         }
     }

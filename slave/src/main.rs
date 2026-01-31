@@ -1,8 +1,8 @@
 use std::{sync::Arc, thread, time::Duration};
 
-use common::slave_api::DeviceState;
+use common::{hardware_abstraction::ProcessImageAccess, slave_api::DeviceState};
 use log::info;
-use slave::{DeviceStateManager, DummyHardware, ProcessImageAccess};
+use slave::{DeviceStateManager, DummyHardware};
 
 fn main() {
     env_logger::init();

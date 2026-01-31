@@ -1,0 +1,6 @@
+[alias]
+fmta = "fmt --all"
+lint = "clippy --all-targets --all-features"
+lint-fix = "clippy --all-targets --all-features --fix --allow-dirty"
+checka = "check --all-targets --all-features"
+testa = "test --all --all-features"

@@ -15,114 +15,21 @@
 //! in-memory queues. The fixture handles all the boilerplate setup, allowing
 //! tests to focus on the actual protocol verification.
 
-use crate::mock_network::{
-    FrameQueue, MockNetwork, MockReceiver, MockSender, create_mock_interface,
-};
+use crate::mock_network::{FrameQueue, MockNetwork, MockReceiver, MockSender};
 use common::discovery_types::{DiscoveryError, ETHERTYPE_SDCP, SdcpHeader};
-use common::slave_api::{DeviceInfo, IpSource};
+use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
+use common::slave_api::IpSource;
 use common::status_codes::StatusCode;
+use common::test_mocks::{MockDeviceInfo, MockNetworkInterface, create_mock_interface};
 use master::DiscoveryMaster;
 use pnet::datalink::{DataLinkReceiver, NetworkInterface};
 use pnet::packet::Packet;
 use pnet::packet::ethernet::EthernetPacket;
 use pnet::util::MacAddr;
-use slave::{DeviceInfoAccess, NetworkInterfaceAccess, handle_packet};
-use std::sync::{Arc, Mutex};
+use slave::handle_packet;
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-
-// ============================================================================
-// Mock Implementations
-// ============================================================================
-
-struct MockDeviceInfo {
-    info: Mutex<DeviceInfo>,
-}
-
-impl MockDeviceInfo {
-    fn new(mac: MacAddr) -> Self {
-        Self {
-            info: Mutex::new(DeviceInfo {
-                mac_address: mac.octets().to_vec(),
-                ip_address: vec![192, 168, 1, 100],
-                ip_source: IpSource::Manuell.into(),
-                netmask: vec![255, 255, 255, 0],
-                gateway: vec![192, 168, 1, 1],
-                vendor_id: 0x1234,
-                device_id: 0x5678,
-                serial_number: 0xDEADBEEF,
-                firmware_version: 1,
-                capabilities: 0,
-            }),
-        }
-    }
-
-    fn with_ip(mac: MacAddr, ip: [u8; 4], netmask: [u8; 4], gateway: [u8; 4]) -> Self {
-        let mock = Self::new(mac);
-        {
-            let mut info = mock.info.lock().unwrap();
-            info.ip_address = ip.to_vec();
-            info.netmask = netmask.to_vec();
-            info.gateway = gateway.to_vec();
-        }
-        mock
-    }
-}
-
-impl DeviceInfoAccess for MockDeviceInfo {
-    fn read_device_info(&self) -> DeviceInfo {
-        self.info.lock().unwrap().clone()
-    }
-
-    fn write_device_info(&self, info: DeviceInfo) {
-        *self.info.lock().unwrap() = info;
-    }
-}
-
-struct MockNetworkInterface {
-    #[allow(clippy::type_complexity)]
-    applied_configs: Mutex<Vec<([u8; 4], [u8; 4], [u8; 4])>>,
-    should_fail: bool,
-}
-
-impl MockNetworkInterface {
-    fn new() -> Self {
-        Self {
-            applied_configs: Mutex::new(Vec::new()),
-            should_fail: false,
-        }
-    }
-
-    fn failing() -> Self {
-        Self {
-            applied_configs: Mutex::new(Vec::new()),
-            should_fail: true,
-        }
-    }
-
-    fn get_applied_configs(&self) -> Vec<([u8; 4], [u8; 4], [u8; 4])> {
-        self.applied_configs.lock().unwrap().clone()
-    }
-}
-
-impl NetworkInterfaceAccess for MockNetworkInterface {
-    fn apply_ip_config(
-        &self,
-        ip: [u8; 4],
-        netmask: [u8; 4],
-        gateway: [u8; 4],
-    ) -> Result<(), String> {
-        if self.should_fail {
-            Err("Simulated network failure".to_string())
-        } else {
-            self.applied_configs
-                .lock()
-                .unwrap()
-                .push((ip, netmask, gateway));
-            Ok(())
-        }
-    }
-}
 
 // ============================================================================
 // Test Fixture
@@ -132,6 +39,10 @@ const MASTER_MAC: MacAddr = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01);
 const SLAVE_MAC: MacAddr = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(100);
 
+const TEST_IP: [u8; 4] = [10, 0, 0, 50];
+const TEST_NETMASK: [u8; 4] = [255, 255, 255, 0];
+const TEST_GATEWAY: [u8; 4] = [10, 0, 0, 1];
+
 /// Encapsulates all components needed for a single-slave integration test.
 struct TestFixture {
     master: DiscoveryMaster,
@@ -140,24 +51,31 @@ struct TestFixture {
 
 impl TestFixture {
     fn new() -> Self {
-        Self::with_macs(MASTER_MAC, SLAVE_MAC)
+        Self::with_slave(|tx, rx| SlaveContext::new(SLAVE_MAC, tx, rx))
     }
 
-    fn with_macs(master_mac: MacAddr, slave_mac: MacAddr) -> Self {
+    fn with_slave_ip(ip: [u8; 4], netmask: [u8; 4], gateway: [u8; 4]) -> Self {
+        Self::with_slave(|tx, rx| SlaveContext::with_ip(SLAVE_MAC, ip, netmask, gateway, tx, rx))
+    }
+
+    fn with_failing_slave() -> Self {
+        Self::with_slave(|tx, rx| SlaveContext::with_failing_network(SLAVE_MAC, tx, rx))
+    }
+
+    fn with_slave<F>(create_slave: F) -> Self
+    where
+        F: FnOnce(FrameQueue, FrameQueue) -> SlaveContext,
+    {
         let network = MockNetwork::new();
         let (master_to_slave, slave_to_master) = network.queues();
 
         let master = Self::create_master(
-            master_mac,
+            MASTER_MAC,
             Arc::clone(&master_to_slave),
             Arc::clone(&slave_to_master),
         );
 
-        let slave = SlaveContext::new(
-            slave_mac,
-            Arc::clone(&slave_to_master),
-            Arc::clone(&master_to_slave),
-        );
+        let slave = create_slave(slave_to_master, master_to_slave);
 
         Self { master, slave }
     }
@@ -323,62 +241,29 @@ fn test_discovery_full_cycle() {
 
 #[test]
 fn test_get_ip_config_full_cycle() {
-    let network = MockNetwork::new();
-    let (master_to_slave, slave_to_master) = network.queues();
-
-    let mut master = TestFixture::create_master(
-        MASTER_MAC,
-        Arc::clone(&master_to_slave),
-        Arc::clone(&slave_to_master),
-    );
-
-    let expected_ip = [10, 0, 0, 50];
-    let expected_netmask = [255, 255, 255, 0];
-    let expected_gateway = [10, 0, 0, 1];
-
-    let slave = SlaveContext::with_ip(
-        SLAVE_MAC,
-        expected_ip,
-        expected_netmask,
-        expected_gateway,
-        slave_to_master,
-        master_to_slave,
-    );
-
-    let slave_handle = slave.spawn_single_frame_handler();
+    let fixture = TestFixture::with_slave_ip(TEST_IP, TEST_NETMASK, TEST_GATEWAY);
+    let slave_handle = fixture.slave.spawn_single_frame_handler();
+    let mut master = fixture.master;
 
     let ip_report = master.get_ip_config(SLAVE_MAC, Some(DEFAULT_TIMEOUT));
     slave_handle.join().unwrap();
 
     let report = ip_report.expect("GetIpConfig should succeed");
-    assert_eq!(report.ip, expected_ip);
-    assert_eq!(report.netmask, expected_netmask);
-    assert_eq!(report.gateway, expected_gateway);
+    assert_eq!(report.ip, TEST_IP);
+    assert_eq!(report.netmask, TEST_NETMASK);
+    assert_eq!(report.gateway, TEST_GATEWAY);
     assert_eq!(report.ip_source, IpSource::Manuell);
 }
 
 #[test]
 fn test_set_ip_config_success() {
-    let network = MockNetwork::new();
-    let (master_to_slave, slave_to_master) = network.queues();
-
-    let mut master = TestFixture::create_master(
-        MASTER_MAC,
-        Arc::clone(&master_to_slave),
-        Arc::clone(&slave_to_master),
-    );
-
-    let slave = SlaveContext::new(
-        SLAVE_MAC,
-        Arc::clone(&slave_to_master),
-        Arc::clone(&master_to_slave),
-    );
+    let fixture = TestFixture::new();
+    let slave_handle = fixture.slave.spawn_single_frame_handler();
+    let mut master = fixture.master;
 
     let new_ip = [172, 16, 0, 100];
     let new_netmask = [255, 255, 0, 0];
     let new_gateway = [172, 16, 0, 1];
-
-    let slave_handle = slave.spawn_single_frame_handler();
 
     let result = master.set_ip_config(
         SLAVE_MAC,
@@ -391,11 +276,11 @@ fn test_set_ip_config_success() {
 
     assert!(result.is_ok(), "SetIpConfig should succeed");
 
-    let applied = slave.get_applied_configs();
+    let applied = fixture.slave.get_applied_configs();
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0], (new_ip, new_netmask, new_gateway));
 
-    let updated_info = slave.device_info.read_device_info();
+    let updated_info = fixture.slave.device_info.read_device_info();
     assert_eq!(updated_info.ip_address, new_ip.to_vec());
     assert_eq!(updated_info.netmask, new_netmask.to_vec());
     assert_eq!(updated_info.gateway, new_gateway.to_vec());
@@ -403,22 +288,9 @@ fn test_set_ip_config_success() {
 
 #[test]
 fn test_set_ip_config_failure() {
-    let network = MockNetwork::new();
-    let (master_to_slave, slave_to_master) = network.queues();
-
-    let mut master = TestFixture::create_master(
-        MASTER_MAC,
-        Arc::clone(&master_to_slave),
-        Arc::clone(&slave_to_master),
-    );
-
-    let slave = SlaveContext::with_failing_network(
-        SLAVE_MAC,
-        Arc::clone(&slave_to_master),
-        Arc::clone(&master_to_slave),
-    );
-
-    let slave_handle = slave.spawn_single_frame_handler();
+    let fixture = TestFixture::with_failing_slave();
+    let slave_handle = fixture.slave.spawn_single_frame_handler();
+    let mut master = fixture.master;
 
     let result = master.set_ip_config(
         SLAVE_MAC,
@@ -437,7 +309,7 @@ fn test_set_ip_config_failure() {
     }
 
     // Verify slave did NOT update device info (original IP should remain)
-    let info = slave.device_info.read_device_info();
+    let info = fixture.slave.device_info.read_device_info();
     assert_eq!(info.ip_address, vec![192, 168, 1, 100]);
 }
 
@@ -455,72 +327,24 @@ fn test_multiple_devices_discovery() {
         Arc::clone(&slave_to_master),
     );
 
-    let slave1_device_info: Arc<dyn DeviceInfoAccess> = Arc::new(MockDeviceInfo::new(slave1_mac));
-    {
-        let mut info = slave1_device_info.read_device_info();
-        info.vendor_id = 0x1111;
-        info.device_id = 0x1111;
-        info.serial_number = 0x11111111;
-        slave1_device_info.write_device_info(info);
-    }
+    let slave1 = create_slave_with_device_info(
+        slave1_mac,
+        0x1111,
+        0x1111,
+        0x11111111,
+        &slave_to_master,
+        &master_to_slave,
+    );
+    let slave2 = create_slave_with_device_info(
+        slave2_mac,
+        0x2222,
+        0x2222,
+        0x22222222,
+        &slave_to_master,
+        &master_to_slave,
+    );
 
-    let slave2_device_info: Arc<dyn DeviceInfoAccess> = Arc::new(MockDeviceInfo::new(slave2_mac));
-    {
-        let mut info = slave2_device_info.read_device_info();
-        info.vendor_id = 0x2222;
-        info.device_id = 0x2222;
-        info.serial_number = 0x22222222;
-        slave2_device_info.write_device_info(info);
-    }
-
-    let slave1_interface = create_mock_interface("slave1", slave1_mac);
-    let slave2_interface = create_mock_interface("slave2", slave2_mac);
-    let slave_network: Arc<dyn NetworkInterfaceAccess> = Arc::new(MockNetworkInterface::new());
-
-    let master_to_slave_clone = Arc::clone(&master_to_slave);
-    let slave_to_master_clone = Arc::clone(&slave_to_master);
-
-    let slave_handle = thread::spawn(move || {
-        let mut slave1_tx = MockSender::new(Arc::clone(&slave_to_master_clone));
-        let mut slave2_tx = MockSender::new(slave_to_master_clone);
-
-        thread::sleep(Duration::from_millis(10));
-
-        for _ in 0..20 {
-            let frame_data = master_to_slave_clone.lock().unwrap().pop_front();
-
-            if let Some(frame_vec) = frame_data {
-                if let Some(eth_packet) = EthernetPacket::new(&frame_vec)
-                    && eth_packet.get_ethertype().0 == ETHERTYPE_SDCP
-                {
-                    let payload = eth_packet.payload();
-                    if let Ok(header) = SdcpHeader::read_from(payload) {
-                        handle_packet(
-                            &header,
-                            payload,
-                            &eth_packet,
-                            &mut slave1_tx,
-                            &slave1_interface,
-                            &slave1_device_info,
-                            &slave_network,
-                        );
-                        handle_packet(
-                            &header,
-                            payload,
-                            &eth_packet,
-                            &mut slave2_tx,
-                            &slave2_interface,
-                            &slave2_device_info,
-                            &slave_network,
-                        );
-                        break;
-                    }
-                }
-            } else {
-                thread::sleep(Duration::from_millis(5));
-            }
-        }
-    });
+    let slave_handle = spawn_multi_slave_handler(vec![slave1, slave2], master_to_slave);
 
     let discovered = master.discover_devices(Some(Duration::from_millis(200)));
     slave_handle.join().unwrap();
@@ -536,4 +360,77 @@ fn test_multiple_devices_discovery() {
 
     let dev2 = master.discovered_devices().get(&slave2_mac).unwrap();
     assert_eq!(dev2.vendor_id, 0x2222);
+}
+
+// ============================================================================
+// Multi-Slave Test Helpers
+// ============================================================================
+
+struct SlaveInstance {
+    interface: NetworkInterface,
+    device_info: Arc<dyn DeviceInfoAccess>,
+    network_interface: Arc<dyn NetworkInterfaceAccess>,
+    tx: MockSender,
+}
+
+fn create_slave_with_device_info(
+    mac: MacAddr,
+    vendor_id: u32,
+    device_id: u32,
+    serial_number: u32,
+    tx_queue: &FrameQueue,
+    _rx_queue: &FrameQueue,
+) -> SlaveInstance {
+    let device_info: Arc<dyn DeviceInfoAccess> = Arc::new(MockDeviceInfo::new(mac));
+    {
+        let mut info = device_info.read_device_info();
+        info.vendor_id = vendor_id;
+        info.device_id = device_id;
+        info.serial_number = serial_number;
+        device_info.write_device_info(info);
+    }
+
+    SlaveInstance {
+        interface: create_mock_interface(&format!("slave_{:02x}", mac.5), mac),
+        device_info,
+        network_interface: Arc::new(MockNetworkInterface::new()),
+        tx: MockSender::new(Arc::clone(tx_queue)),
+    }
+}
+
+fn spawn_multi_slave_handler(
+    mut slaves: Vec<SlaveInstance>,
+    rx_queue: FrameQueue,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(10));
+
+        for _ in 0..20 {
+            let frame_data = rx_queue.lock().unwrap().pop_front();
+
+            if let Some(frame_vec) = frame_data {
+                if let Some(eth_packet) = EthernetPacket::new(&frame_vec)
+                    && eth_packet.get_ethertype().0 == ETHERTYPE_SDCP
+                {
+                    let payload = eth_packet.payload();
+                    if let Ok(header) = SdcpHeader::read_from(payload) {
+                        for slave in &mut slaves {
+                            handle_packet(
+                                &header,
+                                payload,
+                                &eth_packet,
+                                &mut slave.tx,
+                                &slave.interface,
+                                &slave.device_info,
+                                &slave.network_interface,
+                            );
+                        }
+                        break;
+                    }
+                }
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    })
 }

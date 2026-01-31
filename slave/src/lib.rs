@@ -5,13 +5,11 @@
 //! and hardware abstraction interfaces.
 
 mod discovery;
-mod hardware_abstraction;
 mod hardware_mock;
 mod state_machine;
 
 // Re-export commonly used types
 pub use discovery::start_discovery_listener;
-pub use hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess, ProcessImageAccess};
 pub use hardware_mock::DummyHardware;
 pub use state_machine::DeviceStateManager;
 

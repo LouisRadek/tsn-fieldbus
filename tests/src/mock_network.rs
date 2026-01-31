@@ -20,7 +20,6 @@
 //! ```
 
 use pnet::datalink::{DataLinkReceiver, DataLinkSender, NetworkInterface};
-use pnet::util::MacAddr;
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -147,18 +146,6 @@ impl DataLinkReceiver for MockReceiver {
                 "No frames available",
             ))
         }
-    }
-}
-
-/// Creates a mock `NetworkInterface` for testing.
-pub fn create_mock_interface(name: &str, mac: MacAddr) -> NetworkInterface {
-    NetworkInterface {
-        name: name.to_string(),
-        description: format!("Mock interface {name}"),
-        index: 0,
-        mac: Some(mac),
-        ips: vec![],
-        flags: 0,
     }
 }
 

@@ -8,7 +8,7 @@ publish = false
 # Workspace crates with test-utils feature enabled
 master = { path = "../master", features = ["test-utils"] }
 slave = { path = "../slave", features = ["test-utils"] }
-common = { path = "../common" }
+common = { path = "../common", features = ["test-utils"] }
 
 # For raw socket mocking
 pnet = "0.35"

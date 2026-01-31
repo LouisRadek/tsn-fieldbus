@@ -452,78 +452,157 @@ impl Tlv {
 mod tests {
     use super::*;
 
+    const TEST_VENDOR_ID: u16 = 0x1234;
+    const TEST_DEVICE_ID: u16 = 0x5678;
+    const TEST_SERIAL: u32 = 0xDEADBEEF;
+    const TEST_IP: [u8; 4] = [192, 168, 1, 100];
+    const TEST_NETMASK: [u8; 4] = [255, 255, 255, 0];
+    const TEST_GATEWAY: [u8; 4] = [192, 168, 1, 1];
+
+    #[test]
+    fn test_discovered_device_creation() {
+        let mac = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
+        let device_info = DeviceInfo {
+            vendor_id: TEST_VENDOR_ID,
+            device_id: TEST_DEVICE_ID,
+            serial_number: TEST_SERIAL,
+        };
+
+        let device = DiscoveredDevice::new(mac, device_info);
+
+        assert_eq!(device.mac_address, mac);
+        assert_eq!(device.vendor_id, TEST_VENDOR_ID);
+        assert_eq!(device.device_id, TEST_DEVICE_ID);
+        assert_eq!(device.serial_number, TEST_SERIAL);
+    }
+
+    #[test]
+    fn test_discovery_error_display() {
+        assert!(
+            DiscoveryError::InterfaceNotFound("eth0".to_string())
+                .to_string()
+                .contains("eth0")
+        );
+        assert!(DiscoveryError::Timeout.to_string().contains("Timeout"));
+        assert!(
+            DiscoveryError::DeviceError(StatusCode::IpConflict)
+                .to_string()
+                .contains("IP Conflict")
+        );
+    }
+
     #[test]
     fn test_sdcp_op_code_from_u8() {
         assert_eq!(SdcpOpCode::from(0x01), SdcpOpCode::DiscoverReq);
         assert_eq!(SdcpOpCode::from(0x02), SdcpOpCode::DiscoverRes);
+        assert_eq!(SdcpOpCode::from(0x03), SdcpOpCode::SetIpReq);
+        assert_eq!(SdcpOpCode::from(0x04), SdcpOpCode::SetIpRes);
+        assert_eq!(SdcpOpCode::from(0x05), SdcpOpCode::GetIpReq);
+        assert_eq!(SdcpOpCode::from(0x06), SdcpOpCode::GetIpRes);
+        assert_eq!(SdcpOpCode::from(0x07), SdcpOpCode::ActivateDhcpReq);
+        assert_eq!(SdcpOpCode::from(0x08), SdcpOpCode::ActivateDhcpRes);
+        assert_eq!(SdcpOpCode::from(0x00), SdcpOpCode::UnknownOperation);
         assert_eq!(SdcpOpCode::from(0xFF), SdcpOpCode::UnknownOperation);
     }
 
     #[test]
     fn test_sdcp_header_new() {
         let header = SdcpHeader::new(SdcpOpCode::DiscoverReq, 0x1234);
+
         assert_eq!(header.version, SDCP_VERSION);
         assert_eq!(header.op_code, SdcpOpCode::DiscoverReq);
-        let transaction_id = header.transaction_id;
+        let transaction_id = { header.transaction_id };
         assert_eq!(transaction_id, 0x1234);
         assert_eq!(header.flags, SDCP_FLAGS);
     }
 
     #[test]
-    fn test_sdcp_header_write_read() {
+    fn test_sdcp_header_write_read_roundtrip() {
         let original = SdcpHeader::new(SdcpOpCode::SetIpReq, 0x5678);
         let mut buf = Vec::new();
         original.write_to(&mut buf).unwrap();
+
         let read = SdcpHeader::read_from(&buf).unwrap();
+
         assert_eq!(read.version, original.version);
         assert_eq!(read.op_code, original.op_code);
-        let read_transaction_id = read.transaction_id;
-        let original_transaction_id = original.transaction_id;
-        assert_eq!(read_transaction_id, original_transaction_id);
+        let (read_tid, orig_tid) = ({ read.transaction_id }, { original.transaction_id });
+        assert_eq!(read_tid, orig_tid);
     }
 
     #[test]
     fn test_tlv_device_info() {
-        let tlv = Tlv::device_info(0x1234, 0x5678, 0xDEADBEEF);
+        let tlv = Tlv::device_info(TEST_VENDOR_ID, TEST_DEVICE_ID, TEST_SERIAL);
+
         assert_eq!(tlv.t_type, TLV_TYPE_DEVICE_INFO);
-        let device_info_parsed = tlv.parse_device_info().unwrap();
-        assert_eq!(device_info_parsed.vendor_id, 0x1234);
-        assert_eq!(device_info_parsed.device_id, 0x5678);
-        assert_eq!(device_info_parsed.serial_number, 0xDEADBEEF);
+        let parsed = tlv.parse_device_info().unwrap();
+        assert_eq!(parsed.vendor_id, TEST_VENDOR_ID);
+        assert_eq!(parsed.device_id, TEST_DEVICE_ID);
+        assert_eq!(parsed.serial_number, TEST_SERIAL);
     }
 
     #[test]
     fn test_tlv_ip_config() {
-        let ip = [192, 168, 1, 100];
-        let netmask = [255, 255, 255, 0];
-        let gateway = [192, 168, 1, 1];
-        let tlv = Tlv::ip_config(ip, netmask, gateway);
-        let ip_config_parsed = tlv.parse_ip_config().unwrap();
-        assert_eq!(ip_config_parsed.ip, ip);
-        assert_eq!(ip_config_parsed.netmask, netmask);
-        assert_eq!(ip_config_parsed.gateway, gateway);
+        let tlv = Tlv::ip_config(TEST_IP, TEST_NETMASK, TEST_GATEWAY);
+
+        let parsed = tlv.parse_ip_config().unwrap();
+        assert_eq!(parsed.ip, TEST_IP);
+        assert_eq!(parsed.netmask, TEST_NETMASK);
+        assert_eq!(parsed.gateway, TEST_GATEWAY);
     }
 
     #[test]
     fn test_tlv_ip_report() {
-        let ip = [10, 0, 0, 5];
-        let netmask = [255, 255, 255, 0];
-        let gateway = [10, 0, 0, 1];
-        let tlv = Tlv::ip_report(ip, netmask, gateway, IpSource::Dhcp);
-        let ip_report_parsed = tlv.parse_ip_report().unwrap();
-        assert_eq!(ip_report_parsed.ip, ip);
-        assert_eq!(ip_report_parsed.netmask, netmask);
-        assert_eq!(ip_report_parsed.gateway, gateway);
-        assert_eq!(ip_report_parsed.ip_source, IpSource::Dhcp);
+        let tlv = Tlv::ip_report(TEST_IP, TEST_NETMASK, TEST_GATEWAY, IpSource::Dhcp);
+
+        let parsed = tlv.parse_ip_report().unwrap();
+        assert_eq!(parsed.ip, TEST_IP);
+        assert_eq!(parsed.netmask, TEST_NETMASK);
+        assert_eq!(parsed.gateway, TEST_GATEWAY);
+        assert_eq!(parsed.ip_source, IpSource::Dhcp);
     }
 
     #[test]
-    fn test_tlv_write_read() {
-        let original = Tlv::status_report(StatusCode::NoError);
+    fn test_tlv_status_report() {
+        let tlv = Tlv::status_report(StatusCode::IpConflict);
+
+        assert_eq!(tlv.t_type, TLV_TYPE_STATUS_REPORT);
+        assert_eq!(tlv.parse_status_report(), Some(StatusCode::IpConflict));
+    }
+
+    #[test]
+    fn test_tlv_write_read_roundtrip() {
+        let original = Tlv::device_info(TEST_VENDOR_ID, TEST_DEVICE_ID, TEST_SERIAL);
         let mut buf = Vec::new();
         original.write_to(&mut buf).unwrap();
+
         let read = Tlv::read_from(&buf).unwrap();
+
         assert_eq!(read.t_type, original.t_type);
         assert_eq!(read.value, original.value);
+    }
+
+    #[test]
+    fn test_tlv_parse_wrong_type_returns_none() {
+        let ip_config_tlv = Tlv::ip_config(TEST_IP, TEST_NETMASK, TEST_GATEWAY);
+
+        assert!(ip_config_tlv.parse_device_info().is_none());
+        assert!(ip_config_tlv.parse_status_report().is_none());
+        assert!(ip_config_tlv.parse_ip_report().is_none());
+    }
+
+    #[test]
+    fn test_tlv_parse_wrong_length_returns_none() {
+        let short_tlv = Tlv::new(TLV_TYPE_DEVICE_INFO, vec![0; 4]);
+        assert!(short_tlv.parse_device_info().is_none());
+
+        let short_ip_tlv = Tlv::new(TLV_TYPE_IP_CONFIG, vec![0; 8]);
+        assert!(short_ip_tlv.parse_ip_config().is_none());
+
+        let short_report_tlv = Tlv::new(TLV_TYPE_IP_REPORT, vec![0; 12]);
+        assert!(short_report_tlv.parse_ip_report().is_none());
+
+        let long_status_tlv = Tlv::new(TLV_TYPE_STATUS_REPORT, vec![0; 2]);
+        assert!(long_status_tlv.parse_status_report().is_none());
     }
 }

@@ -1,5 +1,16 @@
-#![allow(dead_code)]
-use common::slave_api::{DeviceInfo, ProcessVariable};
+//! Hardware Abstraction Traits
+//!
+//! This module defines traits for abstracting hardware access in fieldbus devices.
+//! These traits must be implemented by device manufacturers
+//! to integrate their hardware with the TSN fieldbus protocol.
+//!
+//! # Traits
+//!
+//! - [`DeviceInfoAccess`]: Reading and writing device identification information
+//! - [`NetworkInterfaceAccess`]: Configuring network interface settings
+//! - [`ProcessImageAccess`]: Accessing process data (inputs/outputs)
+
+use crate::slave_api::{DeviceInfo, ProcessVariable};
 
 /// Trait abstracting the hardware access for process images.
 ///
