@@ -36,13 +36,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 use std::{cmp, io};
 
-/// Broadcast MAC address for network-wide discovery
 const BROADCAST_MAC: MacAddr = MacAddr(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
-
-/// Default timeout for waiting for discovery responses
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2000);
-
-/// Default timeout for waiting for unicast responses (SetIp, GetIp)
 const DEFAULT_UNICAST_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Minimum Ethernet frame size (excluding FCS)

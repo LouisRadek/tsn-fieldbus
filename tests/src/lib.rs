@@ -13,7 +13,7 @@
 //!
 //! # Mock Network Design
 //!
-//! The [`MockNetwork`] struct creates a bidirectional communication channel:
+//! The MockNetwork struct creates a bidirectional communication channel:
 //!
 //! ```text
 //!  ┌────────────┐                        ┌────────────┐
