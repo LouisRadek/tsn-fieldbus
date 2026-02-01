@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! L2 Protocol Header Types and Message Handling
 //!
 //! This module provides types and utilities for working with the L2 protocol, which handles data transmission over Ethernet.
@@ -34,13 +33,9 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Cursor};
 
-/// EtherType value for TSN L2 protocol frames
 pub const ETHERTYPE_L2_PROTOCOL: u16 = 0x88B6;
-/// TSN L2 protocol version (currently 0x01)
 pub const L2_PROTOCOL_VERSION: u8 = 0x01;
-/// Default flags for L2 headers
 pub const L2_PROTOCOL_FLAGS: u8 = 0x00;
-/// Fixed size of the L2 header in bytes
 pub const L2_HEADER_SIZE: usize = 7;
 
 /// L2 protocol message header

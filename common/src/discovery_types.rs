@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! SDCP (Service Discovery Control Protocol) Types and Message Handling
 //!
 //! This module provides types and utilities for working with the SDCP protocol,
@@ -41,21 +40,13 @@ use std::io::{self, Cursor, Read};
 
 use crate::{slave_api::IpSource, status_codes::StatusCode};
 
-/// EtherType value for SDCP protocol frames
 pub const ETHERTYPE_SDCP: u16 = 0x88B5;
-/// SDCP protocol version (currently 0x01)
 pub const SDCP_VERSION: u8 = 0x01;
-/// SDCP Header size (currently 5 bytes)
 pub const SDCP_HEADER_SIZE: u8 = 5;
-/// Default flags for SDCP headers
 pub const SDCP_FLAGS: u8 = 0x00;
-/// TLV type identifier for device information
 pub const TLV_TYPE_DEVICE_INFO: u8 = 0x01;
-/// TLV type identifier for IP configuration
 pub const TLV_TYPE_IP_CONFIG: u8 = 0x02;
-/// TLV type identifier for status reports
 pub const TLV_TYPE_STATUS_REPORT: u8 = 0x03;
-/// TLV type identifier for IP reports
 pub const TLV_TYPE_IP_REPORT: u8 = 0x04;
 
 /// SDCP operation codes specifying the type of message
@@ -345,7 +336,7 @@ impl Tlv {
         Tlv::new(TLV_TYPE_IP_REPORT, value)
     }
 
-    /// Serialize this TLV to bytes in the format: [Type][Length][Value...]
+    /// Serialize this TLV to bytes in the format: Type, Length, Value...
     ///
     /// # Errors
     /// Returns `io::Error` if writing to the buffer fails
@@ -383,10 +374,12 @@ impl Tlv {
         if self.t_type != TLV_TYPE_DEVICE_INFO || self.value.len() != 8 {
             return None;
         }
+
         let vendor_id = u16::from_be_bytes([self.value[0], self.value[1]]);
         let device_id = u16::from_be_bytes([self.value[2], self.value[3]]);
         let serial_number =
             u32::from_be_bytes([self.value[4], self.value[5], self.value[6], self.value[7]]);
+
         Some(DeviceInfo {
             vendor_id,
             device_id,
@@ -401,12 +394,14 @@ impl Tlv {
         if self.t_type != TLV_TYPE_IP_CONFIG || self.value.len() != 12 {
             return None;
         }
+
         let mut ip = [0u8; 4];
         let mut netmask = [0u8; 4];
         let mut gateway = [0u8; 4];
         ip.copy_from_slice(&self.value[0..4]);
         netmask.copy_from_slice(&self.value[4..8]);
         gateway.copy_from_slice(&self.value[8..12]);
+
         Some(IpConfig {
             ip,
             netmask,
@@ -421,6 +416,7 @@ impl Tlv {
         if self.t_type != TLV_TYPE_STATUS_REPORT || self.value.len() != 1 {
             return None;
         }
+
         let status_code = self.value[0];
         Some(StatusCode::from(status_code))
     }
@@ -432,6 +428,7 @@ impl Tlv {
         if self.t_type != TLV_TYPE_IP_REPORT || self.value.len() != 13 {
             return None;
         }
+
         let mut ip = [0u8; 4];
         let mut netmask = [0u8; 4];
         let mut gateway = [0u8; 4];
@@ -439,6 +436,7 @@ impl Tlv {
         netmask.copy_from_slice(&self.value[4..8]);
         gateway.copy_from_slice(&self.value[8..12]);
         let ip_source = IpSource::try_from(self.value[12] as i32).unwrap_or_default();
+
         Some(IpReport {
             ip,
             netmask,
