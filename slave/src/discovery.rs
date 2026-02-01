@@ -16,7 +16,7 @@ use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
 use common::slave_api::IpSource;
 use common::status_codes::StatusCode;
 use log::{info, warn};
-use pnet::datalink::{self, Channel, NetworkInterface};
+use pnet::datalink::{self, Channel, DataLinkSender, NetworkInterface};
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
@@ -112,110 +112,161 @@ pub fn handle_packet(
 ) {
     match header.op_code {
         SdcpOpCode::DiscoverReq => {
-            info!("Received DISCOVER_REQ from {}", ethernet_frame.get_source());
-
-            let device_info = device_info_access.read_device_info();
-            let tlv = Tlv::device_info(
-                device_info.vendor_id as u16,
-                device_info.device_id as u16,
-                device_info.serial_number,
-            );
-
-            send_response(
+            handle_discovery_request(
+                header,
+                ethernet_frame,
                 transmitter,
                 interface,
-                ethernet_frame.get_source(),
-                SdcpOpCode::DiscoverRes,
-                header.transaction_id,
-                tlv,
+                device_info_access,
             );
         }
         SdcpOpCode::SetIpReq => {
-            if raw_payload.len() > 5
-                && let Ok(tlv) = Tlv::read_from(&raw_payload[5..])
-                && let Some(ip_config) = tlv.parse_ip_config()
-            {
-                info!("Received IP Config: {ip_config:?}");
-
-                match network_interface_access.apply_ip_config(
-                    ip_config.ip,
-                    ip_config.netmask,
-                    ip_config.gateway,
-                ) {
-                    Ok(_) => {
-                        info!("Successfully applied IP configuration to network interface");
-
-                        let mut device_info = device_info_access.read_device_info();
-                        device_info.ip_address = ip_config.ip.to_vec();
-                        device_info.netmask = ip_config.netmask.to_vec();
-                        device_info.gateway = ip_config.gateway.to_vec();
-                        device_info_access.write_device_info(device_info);
-
-                        let status_tlv = Tlv::status_report(StatusCode::NoError);
-                        send_response(
-                            transmitter,
-                            interface,
-                            ethernet_frame.get_source(),
-                            SdcpOpCode::SetIpRes,
-                            header.transaction_id,
-                            status_tlv,
-                        );
-                    }
-                    Err(e) => {
-                        warn!("Failed to apply IP configuration: {e}");
-
-                        let status_tlv = Tlv::status_report(StatusCode::OsFailure);
-                        send_response(
-                            transmitter,
-                            interface,
-                            ethernet_frame.get_source(),
-                            SdcpOpCode::SetIpRes,
-                            header.transaction_id,
-                            status_tlv,
-                        );
-                    }
-                }
-            }
-        }
-        SdcpOpCode::GetIpReq => {
-            info!(
-                "Received Get IP request from: {}",
-                ethernet_frame.get_source()
-            );
-
-            let device_info = device_info_access.read_device_info();
-
-            let ip: [u8; 4] = device_info
-                .ip_address
-                .as_slice()
-                .try_into()
-                .unwrap_or([0, 0, 0, 0]);
-            let netmask: [u8; 4] = device_info
-                .netmask
-                .as_slice()
-                .try_into()
-                .unwrap_or([255, 255, 255, 0]);
-            let gateway: [u8; 4] = device_info
-                .gateway
-                .as_slice()
-                .try_into()
-                .unwrap_or([0, 0, 0, 0]);
-            let ip_source =
-                IpSource::try_from(device_info.ip_source).unwrap_or(IpSource::Unspecified);
-
-            let tlv = Tlv::ip_report(ip, netmask, gateway, ip_source);
-
-            send_response(
+            handle_set_ip_request(
+                header,
+                raw_payload,
+                ethernet_frame,
                 transmitter,
                 interface,
-                ethernet_frame.get_source(),
-                SdcpOpCode::GetIpRes,
-                header.transaction_id,
-                tlv,
+                device_info_access,
+                network_interface_access,
+            );
+        }
+        SdcpOpCode::GetIpReq => {
+            handle_get_ip_request(
+                header,
+                ethernet_frame,
+                transmitter,
+                interface,
+                device_info_access,
             );
         }
         _ => {}
     }
+}
+
+fn handle_get_ip_request(
+    header: &SdcpHeader,
+    ethernet_frame: &EthernetPacket<'_>,
+    transmitter: &mut dyn DataLinkSender,
+    interface: &NetworkInterface,
+    device_info_access: &Arc<dyn DeviceInfoAccess + 'static>,
+) {
+    info!(
+        "Received Get IP request from: {}",
+        ethernet_frame.get_source()
+    );
+
+    let device_info = device_info_access.read_device_info();
+
+    let ip: [u8; 4] = device_info
+        .ip_address
+        .as_slice()
+        .try_into()
+        .unwrap_or([0, 0, 0, 0]);
+    let netmask: [u8; 4] = device_info
+        .netmask
+        .as_slice()
+        .try_into()
+        .unwrap_or([255, 255, 255, 0]);
+    let gateway: [u8; 4] = device_info
+        .gateway
+        .as_slice()
+        .try_into()
+        .unwrap_or([0, 0, 0, 0]);
+    let ip_source = IpSource::try_from(device_info.ip_source).unwrap_or(IpSource::Unspecified);
+
+    let tlv = Tlv::ip_report(ip, netmask, gateway, ip_source);
+
+    send_response(
+        transmitter,
+        interface,
+        ethernet_frame.get_source(),
+        SdcpOpCode::GetIpRes,
+        header.transaction_id,
+        tlv,
+    );
+}
+
+fn handle_set_ip_request(
+    header: &SdcpHeader,
+    raw_payload: &[u8],
+    ethernet_frame: &EthernetPacket<'_>,
+    transmitter: &mut dyn DataLinkSender,
+    interface: &NetworkInterface,
+    device_info_access: &Arc<dyn DeviceInfoAccess>,
+    network_interface_access: &Arc<dyn NetworkInterfaceAccess>,
+) {
+    if raw_payload.len() > 5
+        && let Ok(tlv) = Tlv::read_from(&raw_payload[5..])
+        && let Some(ip_config) = tlv.parse_ip_config()
+    {
+        info!("Received IP Config: {ip_config:?}");
+
+        match network_interface_access.apply_ip_config(
+            ip_config.ip,
+            ip_config.netmask,
+            ip_config.gateway,
+        ) {
+            Ok(_) => {
+                info!("Successfully applied IP configuration to network interface");
+
+                let mut device_info = device_info_access.read_device_info();
+                device_info.ip_address = ip_config.ip.to_vec();
+                device_info.netmask = ip_config.netmask.to_vec();
+                device_info.gateway = ip_config.gateway.to_vec();
+                device_info_access.write_device_info(device_info);
+
+                let status_tlv = Tlv::status_report(StatusCode::NoError);
+                send_response(
+                    transmitter,
+                    interface,
+                    ethernet_frame.get_source(),
+                    SdcpOpCode::SetIpRes,
+                    header.transaction_id,
+                    status_tlv,
+                );
+            }
+            Err(e) => {
+                warn!("Failed to apply IP configuration: {e}");
+
+                let status_tlv = Tlv::status_report(StatusCode::OsFailure);
+                send_response(
+                    transmitter,
+                    interface,
+                    ethernet_frame.get_source(),
+                    SdcpOpCode::SetIpRes,
+                    header.transaction_id,
+                    status_tlv,
+                );
+            }
+        }
+    }
+}
+
+fn handle_discovery_request(
+    header: &SdcpHeader,
+    ethernet_frame: &EthernetPacket<'_>,
+    transmitter: &mut dyn DataLinkSender,
+    interface: &NetworkInterface,
+    device_info_access: &Arc<dyn DeviceInfoAccess>,
+) {
+    info!("Received DISCOVER_REQ from {}", ethernet_frame.get_source());
+
+    let device_info = device_info_access.read_device_info();
+    let tlv = Tlv::device_info(
+        device_info.vendor_id as u16,
+        device_info.device_id as u16,
+        device_info.serial_number,
+    );
+
+    send_response(
+        transmitter,
+        interface,
+        ethernet_frame.get_source(),
+        SdcpOpCode::DiscoverRes,
+        header.transaction_id,
+        tlv,
+    );
 }
 
 fn send_response(

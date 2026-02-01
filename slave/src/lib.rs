@@ -2,7 +2,7 @@
 //!
 //! This crate implements the slave-side of the TSN fieldbus protocol,
 //! including SDCP discovery handling, state machine management,
-//! and hardware abstraction interfaces.
+//! the management API and security mechanisms.
 
 mod discovery;
 mod hardware_mock;

@@ -23,13 +23,8 @@ pub struct DummyHardware {
     device_info: Arc<RwLock<DeviceInfo>>,
 }
 
-impl Default for DummyHardware {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl DummyHardware {
+    #[allow(clippy::new_without_default)]
     /// Create an instance of DummyHardware
     ///
     /// Initialize memory with zeros.
