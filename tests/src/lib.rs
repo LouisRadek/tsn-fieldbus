@@ -32,3 +32,6 @@ mod mock_network;
 
 #[cfg(test)]
 mod discovery_integration_tests;
+
+#[cfg(test)]
+mod slave_api_integration_tests;

@@ -16,6 +16,8 @@ pnet = "0.35"
 # For logging in tests
 log = "0.4"
 env_logger = "0.11"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tonic = "0.12"
 
 [lib]
 name = "integration_tests"
