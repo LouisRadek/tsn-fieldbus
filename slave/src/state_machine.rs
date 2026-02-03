@@ -21,8 +21,7 @@
 //! access to the device state. Multiple threads can safely call state transition methods
 //! concurrently.
 
-use common::slave_api::DeviceState;
-use common::status_codes::StatusCode;
+use common::slave_api::{DeviceState, StatusCode};
 use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 
@@ -137,7 +136,7 @@ impl DeviceStateManager {
 
             (c, t) => {
                 warn!("Invalid State Transition request: {c:?} -> {t:?}");
-                Err(StatusCode::StateConflict)
+                Err(StatusCode::ErrStateConflict)
             }
         }
     }

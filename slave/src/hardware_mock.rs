@@ -7,7 +7,9 @@
 //! to process variables and device information respectively.
 
 use common::{
-    hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess, ProcessImageAccess},
+    hardware_abstraction::{
+        DeviceInfoAccess, NetworkInterfaceAccess, ProcessImageAccess, TemperatureSensorAccess,
+    },
     slave_api::{DataType, DeviceInfo, IpSource, ProcessVariable, VariableDirection},
 };
 use std::sync::{Arc, RwLock};
@@ -162,6 +164,18 @@ impl ProcessImageAccess for DummyHardware {
     }
 }
 
+impl TemperatureSensorAccess for DummyHardware {
+    fn read_temperature(&self) -> i16 {
+        if let Ok(lock) = self.input_image.read() {
+            let high = lock.first().copied().unwrap_or(0);
+            let low = lock.get(1).copied().unwrap_or(0);
+            i16::from_be_bytes([high, low])
+        } else {
+            0
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +248,17 @@ mod tests {
         // Test zero
         hw.simulate_sensor_change(0);
         assert_sensor_bytes(&hw, 0x00, 0x00);
+    }
+
+    #[test]
+    fn test_temperature_sensor_access() {
+        let hw = DummyHardware::new();
+
+        hw.simulate_sensor_change(1234);
+        assert_eq!(hw.read_temperature(), 1234);
+
+        hw.simulate_sensor_change(-10);
+        assert_eq!(hw.read_temperature(), -10);
     }
 
     #[test]

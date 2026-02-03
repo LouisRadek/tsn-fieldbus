@@ -95,12 +95,6 @@ pub fn start_discovery_listener(
 /// * `interface` - Local network interface information
 /// * `device_info_access` - Access to device identification and configuration
 /// * `network_interface_access` - Access to network interface configuration
-///
-/// # Visibility
-///
-/// This function is public when the `test-utils` feature is enabled,
-/// allowing integration tests to directly invoke packet handling.
-#[cfg(feature = "test-utils")]
 pub fn handle_packet(
     header: &SdcpHeader,
     raw_payload: &[u8],

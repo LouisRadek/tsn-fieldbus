@@ -94,3 +94,14 @@ pub trait NetworkInterfaceAccess: Send + Sync {
         gateway: [u8; 4],
     ) -> Result<(), String>;
 }
+
+/// Trait for accessing a device-integrated temperature sensor.
+///
+/// Manufacturers should implement this trait to expose the current
+/// temperature reading from device hardware.
+/// The unit (°C, etc.) is left to the implementer but should be documented by the
+/// manufacturer implementation so consumers can interpret values correctly.
+pub trait TemperatureSensorAccess: Send + Sync {
+    /// Read the current temperature value from the hardware sensor.
+    fn read_temperature(&self) -> i16;
+}

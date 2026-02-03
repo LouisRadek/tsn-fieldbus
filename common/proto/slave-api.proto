@@ -46,6 +46,7 @@ enum LogReason {
   STATUS_CODE_CHANGE = 2;
   SYNC_STATUS_CHANGE = 3;
   MISSED_CYCLE = 4;
+  TEMPERATURE_CHANGE = 5;
 }
 
 enum DataType {
@@ -93,8 +94,8 @@ message DeviceStatus {
   DeviceState state = 2;
   SyncStatus sync_status = 3;
   uint32 missed_cycles = 4;
-  uint32 min_cycle_time_ns = 5;
-  uint32 max_cycle_time_ns = 6;
+  uint32 min_cycle_time = 5;
+  uint32 max_cycle_time = 6;
   sint32 temperature = 7;
   uint64 timestamp = 8;
 }
@@ -124,8 +125,7 @@ message StatusResponse {
 }
 
 message SubscribeStatusRequest {
-  uint32 temperature_threshold = 1;
-  uint32 min_interval_ms = 2;
+  optional uint32 min_interval_sec = 1;
 }
 
 message GetLogRequest {
@@ -143,7 +143,7 @@ message ProcessDataLayoutResponse {
 }
 
 message GetTokenRequest {
-  uint32 shared_key_part = 1;
+  bytes shared_key = 1;
 }
 
 message GetTokenResponse {
@@ -169,8 +169,9 @@ service SlaveAPI {
   /// Excluded from the DeviceStatus change publish are the fields min_cycle_time, max_cycle_time, timestamp, because they change to frequently.
   /// The temperature field is acknowledged only after exceeding a threshold.
   /// Input:
-  ///   - temperature_threshold: Results in this [temperature_threshold, temperature_threshold] which if exceeded results in a DeviceStatus publish.
   ///   - min_interval_ms: Optional minimal interval at which the DeviceStatus is published even if nothing changed.
+  ///                      The value should be greater or equals 10s to prevent flooding of the network. Otherwise, it will be set to a default of 60s.
+  ///                      If it isn't supplied the device status is only published on changes.
   /// Output: DeviceStatus information.
   rpc SubscribeToDeviceStatus(SubscribeStatusRequest) returns (stream DeviceStatus);
 

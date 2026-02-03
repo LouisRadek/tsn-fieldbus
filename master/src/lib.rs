@@ -5,6 +5,8 @@
 //! configuring slave devices on the network.
 
 mod discovery;
+mod slave_api_client;
 
 // Re-export commonly used structs
 pub use discovery::DiscoveryMaster;
+pub use slave_api_client::SlaveApiClient;

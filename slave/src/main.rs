@@ -1,10 +1,13 @@
-use std::{sync::Arc, thread, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use common::{hardware_abstraction::ProcessImageAccess, slave_api::DeviceState};
-use log::info;
-use slave::{DeviceStateManager, DummyHardware};
+use log::{debug, info};
+use slave::{
+    DeviceStateManager, DeviceStatusStore, DummyHardware, TokenStore, start_slave_api_server,
+};
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     info!("Starting TSN Fieldbus Slave...");
 
@@ -15,41 +18,58 @@ fn main() {
     );
 
     let state_manager = DeviceStateManager::new();
-
-    thread::sleep(Duration::from_secs(1));
     state_manager
         .set_target_state(DeviceState::DiscoverySync)
         .unwrap();
-    info!("Current State: {:?}", state_manager.get_state());
-
-    thread::sleep(Duration::from_secs(1));
     state_manager.set_target_state(DeviceState::PreOp).unwrap();
-    info!("Current State: {:?}", state_manager.get_state());
-
-    thread::sleep(Duration::from_secs(1));
     state_manager.set_target_state(DeviceState::SafeOp).unwrap();
-    info!("Current State: {:?}", state_manager.get_state());
-
-    thread::sleep(Duration::from_secs(1));
     state_manager.set_target_state(DeviceState::Op).unwrap();
-    info!("Current State: {:?}", state_manager.get_state());
 
-    let hardware_clone = Arc::clone(&hardware);
-    let _hw_handle = thread::spawn(move || {
-        let mut temp_sim = 2000;
-        loop {
-            hardware_clone.simulate_sensor_change(temp_sim);
-            temp_sim += 1;
-            thread::sleep(Duration::from_millis(500));
+    let api_address: SocketAddr = "0.0.0.0:50051".parse()?;
+    let api_device_info = Arc::clone(&hardware);
+    let api_process_image = Arc::clone(&hardware);
+    let api_state_manager = state_manager.clone();
+
+    let status_store = DeviceStatusStore::new();
+    status_store.spawn_background_tasks(hardware.clone());
+
+    let token_store = TokenStore::from_env()?;
+
+    tokio::spawn(async move {
+        if let Err(error) = start_slave_api_server(
+            api_address,
+            api_device_info,
+            api_process_image,
+            api_state_manager,
+            status_store,
+            token_store,
+        )
+        .await
+        {
+            debug!("Slave API server terminated: {error}");
         }
     });
 
+    let hardware_clone = Arc::clone(&hardware);
+    tokio::spawn(async move {
+        let mut temp_sim = 2000;
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            hardware_clone.simulate_sensor_change(temp_sim);
+            temp_sim += 1;
+        }
+    });
+
+    let mut log_interval = tokio::time::interval(Duration::from_secs(1));
     loop {
-        thread::sleep(Duration::from_secs(1));
+        log_interval.tick().await;
         let inputs = hardware.read_inputs();
-        info!(
-            "Current Temperatur: {:?}",
-            i16::from_be_bytes([inputs[0], inputs[1]])
-        );
+        if inputs.len() >= 2 {
+            info!(
+                "Current Temperatur: {:?}",
+                i16::from_be_bytes([inputs[0], inputs[1]])
+            );
+        }
     }
 }
