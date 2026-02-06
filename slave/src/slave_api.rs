@@ -12,11 +12,13 @@
 
 use common::hardware_abstraction::{DeviceInfoAccess, ProcessImageAccess};
 use common::slave_api::{
-    self, DeviceInfo, DeviceStatus, GetLogRequest, GetLogResponse, GetTokenRequest,
-    GetTokenResponse, ProcessDataLayoutResponse, StatusCode, StatusResponse,
-    SubscribeStatusRequest,
+    self, ConfigureStreamsRequest, DeviceInfo, DeviceState, DeviceStatus, Direction, GetLogRequest,
+    GetLogResponse, GetTokenRequest, GetTokenResponse, ProcessDataLayoutResponse, ProcessVariable,
+    StatusCode, StatusResponse, StreamConfig, SubscribeStatusRequest,
 };
+use common::stream_store::StreamStore;
 use log::{debug, info};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +31,7 @@ use crate::{DeviceStateManager, DeviceStatusStore, TokenStore};
 const TOKEN_HEADER_NAME: &str = "token";
 const TOKEN_TTL_SECONDS: u64 = 600;
 const MIN_INTERVAL_SEC_STATUS_PUBLISH: u32 = 60;
+const MIN_CYCLE_TIME_NS: u32 = 250000;
 
 /// Start the gRPC server and serve the `SlaveApi` implementation at `address`.
 ///
@@ -43,6 +46,7 @@ pub async fn start_slave_api_server(
     state_manager: DeviceStateManager,
     status_store: DeviceStatusStore,
     token_store: TokenStore,
+    stream_store: StreamStore,
 ) -> Result<(), tonic::transport::Error> {
     let service = SlaveApiService::new(
         device_info_access,
@@ -50,6 +54,7 @@ pub async fn start_slave_api_server(
         state_manager,
         status_store,
         token_store,
+        stream_store,
     );
 
     info!("Starting Slave API server on {address}");
@@ -67,6 +72,7 @@ struct SlaveApiService {
     state_manager: DeviceStateManager,
     status_store: DeviceStatusStore,
     token_store: TokenStore,
+    stream_store: StreamStore,
 }
 
 impl SlaveApiService {
@@ -76,6 +82,7 @@ impl SlaveApiService {
         state_manager: DeviceStateManager,
         status_store: DeviceStatusStore,
         token_store: TokenStore,
+        stream_store: StreamStore,
     ) -> Self {
         Self {
             device_info_access,
@@ -83,6 +90,7 @@ impl SlaveApiService {
             state_manager,
             status_store,
             token_store,
+            stream_store,
         }
     }
 
@@ -232,6 +240,35 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
         Ok(Response::new(ProcessDataLayoutResponse { variables }))
     }
 
+    async fn configure_streams(
+        &self,
+        request: Request<ConfigureStreamsRequest>,
+    ) -> Result<Response<StatusResponse>, Status> {
+        self.validate_token(&request)?;
+
+        if self.state_manager.get_state() != DeviceState::PreOp {
+            return Ok(Response::new(StatusResponse {
+                code: StatusCode::ErrNotReady as i32,
+            }));
+        }
+
+        let request = request.into_inner();
+        let layout = self.process_image_access.get_layout();
+
+        if let Err(code) = validate_streams(&request.streams, &layout) {
+            return Ok(Response::new(StatusResponse { code: code as i32 }));
+        }
+
+        self.stream_store.reset();
+        if let Err(code) = self.stream_store.add_stream_configs(request.streams) {
+            return Ok(Response::new(StatusResponse { code: code as i32 }));
+        }
+
+        Ok(Response::new(StatusResponse {
+            code: StatusCode::NoError as i32,
+        }))
+    }
+
     async fn get_token(
         &self,
         request: Request<GetTokenRequest>,
@@ -272,4 +309,50 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
             code: StatusCode::ErrNotSupported as i32,
         }))
     }
+}
+
+fn validate_streams(
+    streams: &[StreamConfig],
+    layout: &[ProcessVariable],
+) -> Result<(), StatusCode> {
+    let mut seen_stream_ids = HashSet::new();
+
+    for stream in streams {
+        if stream.stream_id > u16::MAX as u32 {
+            return Err(StatusCode::ErrParamInvalid);
+        }
+        if !seen_stream_ids.insert(stream.stream_id) {
+            return Err(StatusCode::ErrParamInvalid);
+        }
+        if stream.destination_mac.len() != 6 {
+            return Err(StatusCode::ErrParamInvalid);
+        }
+        if stream.cycle_time_nano < MIN_CYCLE_TIME_NS {
+            return Err(StatusCode::ErrParamInvalid);
+        }
+        let content = stream
+            .stream_content
+            .as_ref()
+            .ok_or(StatusCode::ErrParamInvalid)?;
+
+        if content.bit_len == 0 {
+            return Err(StatusCode::ErrParamInvalid);
+        }
+
+        let direction =
+            Direction::try_from(stream.direction).map_err(|_| StatusCode::ErrParamInvalid)?;
+
+        let matches = layout.iter().any(|variable| {
+            variable.direction == direction as i32
+                && variable.byte_offset == content.byte_offset
+                && variable.bit_offset == content.bit_offset
+                && variable.bit_len == content.bit_len
+        });
+
+        if !matches {
+            return Err(StatusCode::ErrParamInvalid);
+        }
+    }
+
+    Ok(())
 }

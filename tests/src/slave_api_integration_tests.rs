@@ -3,7 +3,10 @@
 //! These tests spin up a real gRPC server using the slave runtime components
 //! and exercise all public RPC endpoints through the master-side client.
 
-use common::slave_api::{DeviceState, StatusCode, SubscribeStatusRequest};
+use common::slave_api::{
+    DeviceState, Direction, StatusCode, StreamConfig, StreamContent, SubscribeStatusRequest,
+};
+use common::stream_store::StreamStore;
 use master::SlaveApiClient;
 use slave::{
     DeviceStateManager, DeviceStatusStore, DummyHardware, TokenStore, start_slave_api_server,
@@ -45,6 +48,7 @@ async fn start_slave_server() -> (SocketAddr, DeviceStatusStore, tokio::task::Jo
     let state_manager = DeviceStateManager::new();
     let status_store = DeviceStatusStore::new();
     let token_store = TokenStore::from_env().expect("token store from env");
+    let stream_store = StreamStore::new();
 
     let status_store_clone = status_store.clone();
 
@@ -56,6 +60,7 @@ async fn start_slave_server() -> (SocketAddr, DeviceStatusStore, tokio::task::Jo
             state_manager,
             status_store_clone,
             token_store,
+            stream_store,
         )
         .await;
     });
@@ -156,6 +161,90 @@ async fn test_invalid_shared_key_fails_authentication() {
     let status = client.get_status().await;
     assert!(status.is_err());
     assert_eq!(status.err().unwrap().code(), Code::Unauthenticated);
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_configure_streams_preop_only_and_validation() {
+    let (address, _status_store, handle) = start_slave_server().await;
+    let mut client = connect_client(address, SHARED_KEY_BYTES.to_vec()).await;
+
+    client.get_token().await.expect("get token");
+
+    let response = client
+        .configure_streams(vec![StreamConfig {
+            stream_id: 1,
+            destination_mac: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            vlan_id_pcp: 0x0001,
+            cycle_time_nano: 1_000_000,
+            direction: Direction::Input as i32,
+            stream_content: Some(StreamContent {
+                byte_offset: 0,
+                bit_offset: 0,
+                bit_len: 16,
+            }),
+        }])
+        .await
+        .expect("configure streams");
+    assert_eq!(response.code, StatusCode::ErrNotReady as i32);
+
+    client
+        .set_target_state(DeviceState::DiscoverySync)
+        .await
+        .expect("set discovery sync");
+    client
+        .set_target_state(DeviceState::PreOp)
+        .await
+        .expect("set pre-op");
+
+    let response = client
+        .configure_streams(vec![StreamConfig {
+            stream_id: 1,
+            destination_mac: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            vlan_id_pcp: 0x0001,
+            cycle_time_nano: 1_000_000,
+            direction: Direction::Input as i32,
+            stream_content: Some(StreamContent {
+                byte_offset: 0,
+                bit_offset: 0,
+                bit_len: 16,
+            }),
+        }])
+        .await
+        .expect("configure streams");
+    assert_eq!(response.code, StatusCode::NoError as i32);
+
+    let response = client
+        .configure_streams(vec![
+            StreamConfig {
+                stream_id: 2,
+                destination_mac: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+                vlan_id_pcp: 0x0001,
+                cycle_time_nano: 1_000_000,
+                direction: Direction::Input as i32,
+                stream_content: Some(StreamContent {
+                    byte_offset: 0,
+                    bit_offset: 0,
+                    bit_len: 16,
+                }),
+            },
+            StreamConfig {
+                stream_id: 2,
+                destination_mac: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+                vlan_id_pcp: 0x0001,
+                cycle_time_nano: 1_000_000,
+                direction: Direction::Input as i32,
+                stream_content: Some(StreamContent {
+                    byte_offset: 0,
+                    bit_offset: 0,
+                    bit_len: 16,
+                }),
+            },
+        ])
+        .await
+        .expect("configure streams with duplicates");
+    assert_eq!(response.code, StatusCode::ErrParamInvalid as i32);
 
     handle.abort();
 }
