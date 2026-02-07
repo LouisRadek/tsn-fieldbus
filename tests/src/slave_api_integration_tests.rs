@@ -102,13 +102,18 @@ async fn test_slave_api_endpoints() {
     let status = client.get_status().await.expect("get status");
     assert_eq!(status.state, DeviceState::DiscoverySync as i32);
 
-    let device_info = client.get_device_info().await.expect("get device info");
+    let device_info_response = client.get_device_info().await.expect("get device info");
+    assert_eq!(device_info_response.code, StatusCode::NoError as i32);
+    let device_info = device_info_response
+        .device_info
+        .expect("device info should be present");
     assert!(!device_info.mac_address.is_empty());
 
     let layout = client
         .get_process_data_layout()
         .await
         .expect("get process data layout");
+    assert_eq!(layout.code, StatusCode::NoError as i32);
     assert!(!layout.variables.is_empty());
 
     status_store.update_state(DeviceState::DiscoverySync).await;

@@ -114,7 +114,7 @@ message ProcessVariable {
   uint32 bit_len = 6;
 }
 
-message StreamContent {
+message Position {
   uint32 byte_offset = 1;
   uint32 bit_offset = 2;
   uint32 bit_len = 3;
@@ -126,7 +126,7 @@ message StreamConfig {
   uint32 vlan_id_pcp = 3;
   uint32 cycle_time_nano = 4;
   Direction direction = 5;
-  StreamContent stream_content = 6;
+  Position stream_content = 6;
 }
 
 message Empty {}
@@ -157,8 +157,14 @@ message GetLogResponse {
   repeated LogEntryDeviceStatus log_entries = 2;
 }
 
+message GetDeviceInfoResponse {
+    StatusCode code = 1;
+    optional DeviceInfo device_info = 2;
+}
+
 message ProcessDataLayoutResponse {
-  repeated ProcessVariable variables = 1;
+  StatusCode code = 1;
+  repeated ProcessVariable variables = 2;
 }
 
 message GetTokenRequest {
@@ -207,7 +213,7 @@ service SlaveAPI {
   /// Get device information.
   /// Input: None.
   /// Output: Device information.
-  rpc GetDeviceInfo(Empty) returns (DeviceInfo);
+  rpc GetDeviceInfo(Empty) returns (GetDeviceInfoResponse);
   
   /// Get the process data layout, i.e. what data the device can provide or which inputs it has.
   /// Input: None.

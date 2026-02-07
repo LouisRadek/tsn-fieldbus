@@ -13,7 +13,7 @@
 
 use common::discovery_types::{ETHERTYPE_SDCP, SDCP_HEADER_SIZE, SdcpHeader, SdcpOpCode, Tlv};
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
-use common::slave_api::IpSource;
+use common::slave_api::{DeviceInfo, IpSource};
 use common::status_codes::StatusCode;
 use log::{info, warn};
 use pnet::datalink::{self, Channel, DataLinkSender, NetworkInterface};
@@ -150,7 +150,18 @@ fn handle_get_ip_request(
         ethernet_frame.get_source()
     );
 
-    let device_info = device_info_access.read_device_info();
+    let device_info = device_info_access.read_device_info().unwrap_or(DeviceInfo {
+        mac_address: vec![0, 0, 0, 0, 0, 0],
+        ip_address: vec![0, 0, 0, 0],
+        ip_source: IpSource::Unspecified.into(),
+        netmask: vec![255, 255, 255, 0],
+        gateway: vec![0, 0, 0, 0],
+        vendor_id: 0,
+        device_id: 0,
+        serial_number: 0,
+        firmware_version: 0,
+        capabilities: 0,
+    });
 
     let ip: [u8; 4] = device_info
         .ip_address
@@ -204,7 +215,18 @@ fn handle_set_ip_request(
             Ok(_) => {
                 info!("Successfully applied IP configuration to network interface");
 
-                let mut device_info = device_info_access.read_device_info();
+                let mut device_info = device_info_access.read_device_info().unwrap_or(DeviceInfo {
+                    mac_address: vec![0, 0, 0, 0, 0, 0],
+                    ip_address: vec![0, 0, 0, 0],
+                    ip_source: IpSource::Unspecified.into(),
+                    netmask: vec![255, 255, 255, 0],
+                    gateway: vec![0, 0, 0, 0],
+                    vendor_id: 0,
+                    device_id: 0,
+                    serial_number: 0,
+                    firmware_version: 0,
+                    capabilities: 0,
+                });
                 device_info.ip_address = ip_config.ip.to_vec();
                 device_info.netmask = ip_config.netmask.to_vec();
                 device_info.gateway = ip_config.gateway.to_vec();
@@ -221,7 +243,7 @@ fn handle_set_ip_request(
                 );
             }
             Err(e) => {
-                warn!("Failed to apply IP configuration: {e}");
+                warn!("Failed to apply IP configuration: {e:?}");
 
                 let status_tlv = Tlv::status_report(StatusCode::OsFailure);
                 send_response(
@@ -246,7 +268,18 @@ fn handle_discovery_request(
 ) {
     info!("Received DISCOVER_REQ from {}", ethernet_frame.get_source());
 
-    let device_info = device_info_access.read_device_info();
+    let device_info = device_info_access.read_device_info().unwrap_or(DeviceInfo {
+        mac_address: vec![0, 0, 0, 0, 0, 0],
+        ip_address: vec![0, 0, 0, 0],
+        ip_source: IpSource::Unspecified.into(),
+        netmask: vec![255, 255, 255, 0],
+        gateway: vec![0, 0, 0, 0],
+        vendor_id: 0,
+        device_id: 0,
+        serial_number: 0,
+        firmware_version: 0,
+        capabilities: 0,
+    });
     let tlv = Tlv::device_info(
         device_info.vendor_id as u16,
         device_info.device_id as u16,
@@ -397,7 +430,7 @@ mod tests {
 
         ctx.assert_response_sent();
 
-        let updated_info = ctx.device_info.read_device_info();
+        let updated_info = ctx.device_info.read_device_info().unwrap();
         assert_eq!(updated_info.ip_address, TEST_IP.to_vec());
         assert_eq!(updated_info.netmask, TEST_NETMASK.to_vec());
         assert_eq!(updated_info.gateway, TEST_GATEWAY.to_vec());
@@ -412,7 +445,7 @@ mod tests {
 
         ctx.assert_response_sent();
 
-        let info = ctx.device_info.read_device_info();
+        let info = ctx.device_info.read_device_info().unwrap();
         assert_eq!(
             info.ip_address,
             vec![192, 168, 1, 100],
@@ -484,14 +517,14 @@ mod tests {
     fn test_device_info_persistence_across_operations() {
         let device_info = Arc::new(MockDeviceInfo::new(TEST_MAC));
 
-        let initial = device_info.read_device_info();
+        let initial = device_info.read_device_info().unwrap();
         assert_eq!(initial.vendor_id, 0x1234);
 
         let mut updated = initial;
         updated.ip_address = vec![10, 0, 0, 1];
         device_info.write_device_info(updated);
 
-        let persisted = device_info.read_device_info();
+        let persisted = device_info.read_device_info().unwrap();
         assert_eq!(persisted.ip_address, vec![10, 0, 0, 1]);
         assert_eq!(
             persisted.vendor_id, 0x1234,

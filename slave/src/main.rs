@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use common::stream_store::StreamStore;
 use common::{hardware_abstraction::ProcessImageAccess, slave_api::DeviceState};
 use log::{debug, info};
 use slave::{
@@ -34,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     status_store.spawn_background_tasks(hardware.clone());
 
     let token_store = TokenStore::from_env()?;
+    let stream_store = StreamStore::new();
 
     tokio::spawn(async move {
         if let Err(error) = start_slave_api_server(
@@ -43,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_state_manager,
             status_store,
             token_store,
+            stream_store,
         )
         .await
         {
@@ -64,7 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut log_interval = tokio::time::interval(Duration::from_secs(1));
     loop {
         log_interval.tick().await;
-        let inputs = hardware.read_inputs();
+        let position = common::slave_api::Position {
+            byte_offset: 0,
+            bit_offset: 0,
+            bit_len: 16,
+        };
+        let inputs = hardware.read_outputs(position).unwrap_or_default();
         if inputs.len() >= 2 {
             info!(
                 "Current Temperatur: {:?}",

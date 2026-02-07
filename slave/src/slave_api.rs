@@ -12,9 +12,9 @@
 
 use common::hardware_abstraction::{DeviceInfoAccess, ProcessImageAccess};
 use common::slave_api::{
-    self, ConfigureStreamsRequest, DeviceInfo, DeviceState, DeviceStatus, Direction, GetLogRequest,
-    GetLogResponse, GetTokenRequest, GetTokenResponse, ProcessDataLayoutResponse, ProcessVariable,
-    StatusCode, StatusResponse, StreamConfig, SubscribeStatusRequest,
+    self, ConfigureStreamsRequest, DeviceState, DeviceStatus, Direction, GetDeviceInfoResponse,
+    GetLogRequest, GetLogResponse, GetTokenRequest, GetTokenResponse, ProcessDataLayoutResponse,
+    ProcessVariable, StatusCode, StatusResponse, StreamConfig, SubscribeStatusRequest,
 };
 use common::stream_store::StreamStore;
 use log::{debug, info};
@@ -225,10 +225,21 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
     async fn get_device_info(
         &self,
         request: Request<slave_api::Empty>,
-    ) -> Result<Response<DeviceInfo>, Status> {
+    ) -> Result<Response<GetDeviceInfoResponse>, Status> {
         self.validate_token(&request)?;
-        let info = self.device_info_access.read_device_info();
-        Ok(Response::new(info))
+        let info = match self.device_info_access.read_device_info() {
+            Ok(info) => info,
+            Err(code) => {
+                return Ok(Response::new(GetDeviceInfoResponse {
+                    code: code as i32,
+                    device_info: None,
+                }));
+            }
+        };
+        Ok(Response::new(GetDeviceInfoResponse {
+            code: StatusCode::NoError as i32,
+            device_info: Some(info),
+        }))
     }
 
     async fn get_process_data_layout(
@@ -236,8 +247,19 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
         request: Request<slave_api::Empty>,
     ) -> Result<Response<ProcessDataLayoutResponse>, Status> {
         self.validate_token(&request)?;
-        let variables = self.process_image_access.get_layout();
-        Ok(Response::new(ProcessDataLayoutResponse { variables }))
+        let variables = match self.process_image_access.get_layout() {
+            Ok(layout) => layout,
+            Err(code) => {
+                return Ok(Response::new(ProcessDataLayoutResponse {
+                    code: code as i32,
+                    variables: vec![],
+                }));
+            }
+        };
+        Ok(Response::new(ProcessDataLayoutResponse {
+            code: StatusCode::NoError as i32,
+            variables,
+        }))
     }
 
     async fn configure_streams(
@@ -253,7 +275,10 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
         }
 
         let request = request.into_inner();
-        let layout = self.process_image_access.get_layout();
+        let layout = match self.process_image_access.get_layout() {
+            Ok(layout) => layout,
+            Err(code) => return Ok(Response::new(StatusResponse { code: code as i32 })),
+        };
 
         if let Err(code) = validate_streams(&request.streams, &layout) {
             return Ok(Response::new(StatusResponse { code: code as i32 }));

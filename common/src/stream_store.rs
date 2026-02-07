@@ -103,7 +103,7 @@ fn stream_id_as_u16(stream_id: u32) -> Result<u16, StatusCode> {
 
 #[cfg(test)]
 mod tests {
-    use crate::slave_api::StreamContent;
+    use crate::slave_api::Position;
 
     use super::*;
 
@@ -114,7 +114,7 @@ mod tests {
             vlan_id_pcp: 0x0001,
             cycle_time_nano: 1_000,
             direction: direction as i32,
-            stream_content: Some(StreamContent {
+            stream_content: Some(Position {
                 byte_offset: 0,
                 bit_offset: 0,
                 bit_len: 16,

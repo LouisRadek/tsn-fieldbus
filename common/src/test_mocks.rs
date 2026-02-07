@@ -17,7 +17,7 @@
 //! or during test compilation.
 
 use crate::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
-use crate::slave_api::{DeviceInfo, IpSource};
+use crate::slave_api::{DeviceInfo, IpSource, StatusCode};
 use pnet::datalink::{self, DataLinkReceiver, NetworkInterface};
 use pnet::util::MacAddr;
 use std::collections::VecDeque;
@@ -70,12 +70,13 @@ impl MockDeviceInfo {
 }
 
 impl DeviceInfoAccess for MockDeviceInfo {
-    fn read_device_info(&self) -> DeviceInfo {
-        self.info.lock().unwrap().clone()
+    fn read_device_info(&self) -> Result<DeviceInfo, StatusCode> {
+        Ok(self.info.lock().unwrap().clone())
     }
 
-    fn write_device_info(&self, info: DeviceInfo) {
+    fn write_device_info(&self, info: DeviceInfo) -> Result<(), StatusCode> {
         *self.info.lock().unwrap() = info;
+        Ok(())
     }
 }
 
@@ -116,9 +117,9 @@ impl NetworkInterfaceAccess for MockNetworkInterface {
         ip: [u8; 4],
         netmask: [u8; 4],
         gateway: [u8; 4],
-    ) -> Result<(), String> {
+    ) -> Result<(), StatusCode> {
         if self.should_fail {
-            Err("Simulated network interface failure".to_string())
+            Err(StatusCode::ErrOsFailure)
         } else {
             self.applied_configs
                 .lock()
@@ -219,7 +220,7 @@ mod tests {
     fn test_mock_device_info_default_values() {
         let mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
         let mock = MockDeviceInfo::new(mac);
-        let info = mock.read_device_info();
+        let info = mock.read_device_info().unwrap();
 
         assert_eq!(info.mac_address, vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
         assert_eq!(info.ip_address, vec![192, 168, 1, 100]);
@@ -232,7 +233,7 @@ mod tests {
     fn test_mock_device_info_with_custom_ip() {
         let mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
         let mock = MockDeviceInfo::with_ip(mac, [10, 0, 0, 50], [255, 255, 0, 0], [10, 0, 0, 1]);
-        let info = mock.read_device_info();
+        let info = mock.read_device_info().unwrap();
 
         assert_eq!(info.ip_address, vec![10, 0, 0, 50]);
         assert_eq!(info.netmask, vec![255, 255, 0, 0]);
@@ -244,11 +245,11 @@ mod tests {
         let mac = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
         let mock = MockDeviceInfo::new(mac);
 
-        let mut info = mock.read_device_info();
+        let mut info = mock.read_device_info().unwrap();
         info.ip_address = vec![172, 16, 0, 1];
-        mock.write_device_info(info);
+        mock.write_device_info(info).unwrap();
 
-        let updated = mock.read_device_info();
+        let updated = mock.read_device_info().unwrap();
         assert_eq!(updated.ip_address, vec![172, 16, 0, 1]);
     }
 

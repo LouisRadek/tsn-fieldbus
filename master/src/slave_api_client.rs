@@ -4,9 +4,9 @@
 //! manages token-based authentication for secured endpoints.
 
 use common::slave_api::{
-    self, ConfigureStreamsRequest, DeviceInfo, DeviceStatus, GetLogRequest, GetLogResponse,
-    GetTokenRequest, GetTokenResponse, ProcessDataLayoutResponse, SetTargetStateRequest,
-    StatusResponse, StreamConfig, SubscribeStatusRequest,
+    self, ConfigureStreamsRequest, DeviceStatus, GetDeviceInfoResponse, GetLogRequest,
+    GetLogResponse, GetTokenRequest, GetTokenResponse, ProcessDataLayoutResponse,
+    SetTargetStateRequest, StatusResponse, StreamConfig, SubscribeStatusRequest,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -143,7 +143,7 @@ impl SlaveApiClient {
         }
     }
 
-    pub async fn get_device_info(&mut self) -> Result<DeviceInfo, Status> {
+    pub async fn get_device_info(&mut self) -> Result<GetDeviceInfoResponse, Status> {
         let mut request = Request::new(slave_api::Empty {});
         self.attach_token(&mut request).await?;
         let response = self.client.get_device_info(request).await;
@@ -203,7 +203,9 @@ impl SlaveApiClient {
         &mut self,
         streams: Vec<StreamConfig>,
     ) -> Result<StatusResponse, Status> {
-        let mut request = Request::new(ConfigureStreamsRequest { streams });
+        let mut request = Request::new(ConfigureStreamsRequest {
+            streams: streams.clone(),
+        });
         self.attach_token(&mut request).await?;
         let response = self.client.configure_streams(request).await;
         match response {

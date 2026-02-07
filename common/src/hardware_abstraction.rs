@@ -10,7 +10,7 @@
 //! - [`NetworkInterfaceAccess`]: Configuring network interface settings
 //! - [`ProcessImageAccess`]: Accessing process data (inputs/outputs)
 
-use crate::slave_api::{DeviceInfo, ProcessVariable};
+use crate::slave_api::{DeviceInfo, Position, ProcessVariable, StatusCode};
 
 /// Trait abstracting the hardware access for process images.
 ///
@@ -19,13 +19,16 @@ use crate::slave_api::{DeviceInfo, ProcessVariable};
 /// and has to model the data stored in the process image via ProcessVariables.
 pub trait ProcessImageAccess: Send + Sync {
     /// Returns the data layout and the available data in the process image.
-    fn get_layout(&self) -> Vec<ProcessVariable>;
+    fn get_layout(&self) -> Result<Vec<ProcessVariable>, StatusCode>;
 
-    /// Reads the current state of inputs, e.g. sensor data, into a byte buffer.
-    fn read_inputs(&self) -> Vec<u8>;
+    /// Reads the current state of output data of the provided position in the ProcessImage.
+    /// The output data is e.g. sensor data or movement data for actuators, which then can be packaged and send to other devices acting as inputs for them.
+    /// Throws an error if the position information does not exist in the ProcessImage
+    fn read_outputs(&self, position: Position) -> Result<Vec<u8>, StatusCode>;
 
-    /// Writes data from the master to outputs, e.g. data for the movement of actuators.
-    fn write_outputs(&mut self, data: &[u8]);
+    /// Write input data, i.e. data got from other devices, e.g. data for the movement of actuators, into the ProcessImage to the provided position.
+    /// Throws an error if the position information does not exist in the ProcessImage.
+    fn write_inputs(&self, data: &[u8], position: Position) -> Result<(), StatusCode>;
 }
 
 /// Trait abstracting the hardware access for device information.
@@ -35,7 +38,7 @@ pub trait ProcessImageAccess: Send + Sync {
 pub trait DeviceInfoAccess: Send + Sync {
     /// Reads the device information from hardware storage.
     ///
-    /// Returns the device info containing:
+    /// Returns the device info containing the following parameters or Err(StatusCode):
     /// - MAC address
     /// - IP address; Default: 0.0.0.0
     /// - Netmask; Default: 255.255.255.0
@@ -50,7 +53,7 @@ pub trait DeviceInfoAccess: Send + Sync {
     /// - Implementations should handle potential hardware read failures gracefully
     /// - The data is typically retrieved from EEPROM, flash, or configuration storage
     /// - This method should be thread-safe and idempotent
-    fn read_device_info(&self) -> DeviceInfo;
+    fn read_device_info(&self) -> Result<DeviceInfo, StatusCode>;
 
     /// Writes the device information to hardware storage.
     ///
@@ -63,11 +66,14 @@ pub trait DeviceInfoAccess: Send + Sync {
     /// # Arguments
     /// * `info` - The new device information to store
     ///
+    /// # Returns
+    /// `Ok(())` on success, `Err(StatusCode)` otherwise
+    ///
     /// # Implementation Notes
     /// - Implementations should use interior mutability (e.g., RwLock, Mutex) to allow mutation through &self
     /// - Should handle potential hardware write failures gracefully
     /// - This method should be thread-safe
-    fn write_device_info(&self, info: DeviceInfo);
+    fn write_device_info(&self, info: DeviceInfo) -> Result<(), StatusCode>;
 }
 
 /// Trait abstracting the network interface configuration.
@@ -86,13 +92,13 @@ pub trait NetworkInterfaceAccess: Send + Sync {
     /// * `gateway` - Default gateway as [u8; 4]
     ///
     /// # Returns
-    /// `Ok(())` on success, `Err(String)` with error description on failure
+    /// `Ok(())` on success, `Err(StatusCode)` otherwise
     fn apply_ip_config(
         &self,
         ip: [u8; 4],
         netmask: [u8; 4],
         gateway: [u8; 4],
-    ) -> Result<(), String>;
+    ) -> Result<(), StatusCode>;
 }
 
 /// Trait for accessing a device-integrated temperature sensor.
@@ -101,7 +107,10 @@ pub trait NetworkInterfaceAccess: Send + Sync {
 /// temperature reading from device hardware.
 /// The unit (°C, etc.) is left to the implementer but should be documented by the
 /// manufacturer implementation so consumers can interpret values correctly.
+///
+/// # Returns
+/// `Ok(i16)` on success, `Err(StatusCode)` otherwise
 pub trait TemperatureSensorAccess: Send + Sync {
     /// Read the current temperature value from the hardware sensor.
-    fn read_temperature(&self) -> i16;
+    fn read_temperature(&self) -> Result<i16, StatusCode>;
 }

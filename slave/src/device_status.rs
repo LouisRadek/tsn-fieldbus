@@ -71,22 +71,25 @@ impl DeviceStatusStore {
     ///   and publishes an update when the absolute difference to the last
     ///   published value is >= `TEMPERATURE_THRESHOLD`.
     /// - Logging task: appends a heartbeat log entry every `LOG_INTERVAL_SEC`.
-    pub fn spawn_background_tasks(&self, sensor: Arc<dyn TemperatureSensorAccess>) {
+    pub fn spawn_background_tasks(
+        &self,
+        sensor: Arc<dyn TemperatureSensorAccess>,
+    ) -> Result<(), StatusCode> {
         let temp_store = self.clone();
         tokio::spawn(async move {
             let mut interval =
                 time::interval(Duration::from_secs(TEMPERATURE_READ_INTERVAL_SEC as u64));
-            let mut last_published: i16 = sensor.read_temperature();
+            let mut last_published: i16 = sensor.read_temperature().unwrap_or_default();
             loop {
                 interval.tick().await;
-                let temperature = sensor.read_temperature();
+                if let Ok(temperature) = sensor.read_temperature() {
+                    let has_to_be_published = (temperature - last_published).unsigned_abs() as u32
+                        >= TEMPERATURE_THRESHOLD as u32;
 
-                let has_to_be_published = (temperature - last_published).unsigned_abs() as u32
-                    >= TEMPERATURE_THRESHOLD as u32;
-
-                if has_to_be_published {
-                    last_published = temperature;
-                    temp_store.update_temperature(temperature as i32).await;
+                    if has_to_be_published {
+                        last_published = temperature;
+                        temp_store.update_temperature(temperature as i32).await;
+                    }
                 }
             }
         });
@@ -100,6 +103,8 @@ impl DeviceStatusStore {
                 log_store.append_log(LogReason::Heartbeat, &status);
             }
         });
+
+        Ok(())
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<DeviceStatus> {
