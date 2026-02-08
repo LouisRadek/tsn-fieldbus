@@ -35,3 +35,6 @@ mod discovery_integration_tests;
 
 #[cfg(test)]
 mod slave_api_integration_tests;
+
+#[cfg(test)]
+mod l2_integration_tests;

@@ -7,6 +7,7 @@
 mod device_status;
 mod discovery;
 mod hardware_mock;
+mod l2_handler;
 mod slave_api;
 mod state_machine;
 mod token_store;
@@ -15,6 +16,7 @@ mod token_store;
 pub use device_status::DeviceStatusStore;
 pub use discovery::start_discovery_listener;
 pub use hardware_mock::DummyHardware;
+pub use l2_handler::{L2HandlerHandle, start_l2_handler};
 pub use slave_api::start_slave_api_server;
 pub use state_machine::DeviceStateManager;
 pub use token_store::TokenStore;
@@ -22,3 +24,6 @@ pub use token_store::TokenStore;
 // Re-export handle_packet when test-utils feature is enabled
 #[cfg(feature = "test-utils")]
 pub use discovery::handle_packet;
+
+#[cfg(feature = "test-utils")]
+pub use l2_handler::start_l2_handler_with_mocks;

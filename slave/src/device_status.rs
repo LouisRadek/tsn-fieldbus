@@ -153,10 +153,14 @@ impl DeviceStatusStore {
         let _ = self.broadcaster.send(status);
     }
 
-    pub async fn increment_missed_cycles(&self) {
+    pub async fn increment_missed_cycles_by(&self, count: u32) {
+        if count == 0 {
+            return;
+        }
+
         let mut current = self.current.write().await;
 
-        current.missed_cycles += 1;
+        current.missed_cycles = current.missed_cycles.saturating_add(count);
         current.timestamp = generate_timestamp();
 
         let status = *current;
@@ -167,7 +171,7 @@ impl DeviceStatusStore {
     pub async fn update_min_cycle_time(&self, new_value: u32) {
         let mut current = self.current.write().await;
 
-        if current.min_cycle_time != new_value {
+        if current.min_cycle_time > new_value {
             current.min_cycle_time = new_value;
             current.timestamp = generate_timestamp();
         }
@@ -176,7 +180,7 @@ impl DeviceStatusStore {
     pub async fn update_max_cycle_time(&self, new_value: u32) {
         let mut current = self.current.write().await;
 
-        if current.max_cycle_time != new_value {
+        if current.max_cycle_time < new_value {
             current.max_cycle_time = new_value;
             current.timestamp = generate_timestamp();
         }

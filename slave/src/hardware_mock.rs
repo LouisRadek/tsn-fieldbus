@@ -77,7 +77,7 @@ impl DeviceInfoAccess for DummyHardware {
         if let Ok(lock) = self.device_info.read() {
             Ok(lock.clone())
         } else {
-            return Err(StatusCode::ErrOsFailure);
+            Err(StatusCode::ErrOsFailure)
         }
     }
 
@@ -86,7 +86,7 @@ impl DeviceInfoAccess for DummyHardware {
             *lock = info;
             Ok(())
         } else {
-            return Err(StatusCode::ErrOsFailure);
+            Err(StatusCode::ErrOsFailure)
         }
     }
 }
@@ -151,7 +151,7 @@ impl ProcessImageAccess for DummyHardware {
                 return Err(StatusCode::ErrInvalidLen);
             }
 
-            if position.bit_offset == 0 && position.bit_len % 8 == 0 {
+            if position.bit_offset == 0 && position.bit_len.is_multiple_of(8) {
                 return Ok(lock[offset..end].to_vec());
             }
 
@@ -171,7 +171,7 @@ impl ProcessImageAccess for DummyHardware {
 
             Ok(out)
         } else {
-            return Err(StatusCode::ErrOsFailure);
+            Err(StatusCode::ErrOsFailure)
         }
     }
 
@@ -187,7 +187,7 @@ impl ProcessImageAccess for DummyHardware {
                 return Err(StatusCode::ErrInvalidLen);
             }
 
-            if position.bit_offset == 0 && position.bit_len % 8 == 0 {
+            if position.bit_offset == 0 && position.bit_len.is_multiple_of(8) {
                 lock[offset..end].copy_from_slice(&data[..field_byte_len]);
                 return Ok(());
             }
@@ -210,7 +210,7 @@ impl ProcessImageAccess for DummyHardware {
 
             Ok(())
         } else {
-            return Err(StatusCode::ErrOsFailure);
+            Err(StatusCode::ErrOsFailure)
         }
     }
 }
@@ -381,17 +381,17 @@ mod tests {
 
         assert_eq!(layout.len(), 2);
 
-        let temp = &layout[0];
-        assert_eq!(temp.name, "Temperature");
-        assert_eq!(temp.byte_offset, 0);
-        assert_eq!(temp.bit_len, 16);
-        assert_eq!(temp.direction, Direction::Input as i32);
-
-        let led = &layout[1];
+        let led = &layout[0];
         assert_eq!(led.name, "Status_LED");
         assert_eq!(led.byte_offset, 2);
         assert_eq!(led.bit_len, 1);
         assert_eq!(led.direction, Direction::Output as i32);
+
+        let temp = &layout[1];
+        assert_eq!(temp.name, "Temperature");
+        assert_eq!(temp.byte_offset, 0);
+        assert_eq!(temp.bit_len, 16);
+        assert_eq!(temp.direction, Direction::Input as i32);
     }
 
     #[test]

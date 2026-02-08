@@ -18,8 +18,7 @@
 use crate::mock_network::{FrameQueue, MockNetwork, MockReceiver, MockSender};
 use common::discovery_types::{DiscoveryError, ETHERTYPE_SDCP, SdcpHeader};
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
-use common::slave_api::IpSource;
-use common::status_codes::StatusCode;
+use common::slave_api::{IpSource, StatusCode};
 use common::test_mocks::{MockDeviceInfo, MockNetworkInterface, create_mock_interface};
 use master::DiscoveryMaster;
 use pnet::datalink::{DataLinkReceiver, NetworkInterface};
@@ -280,7 +279,7 @@ fn test_set_ip_config_success() {
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0], (new_ip, new_netmask, new_gateway));
 
-    let updated_info = fixture.slave.device_info.read_device_info();
+    let updated_info = fixture.slave.device_info.read_device_info().unwrap();
     assert_eq!(updated_info.ip_address, new_ip.to_vec());
     assert_eq!(updated_info.netmask, new_netmask.to_vec());
     assert_eq!(updated_info.gateway, new_gateway.to_vec());
@@ -303,13 +302,13 @@ fn test_set_ip_config_failure() {
 
     match result {
         Err(DiscoveryError::DeviceError(status)) => {
-            assert_eq!(status, StatusCode::OsFailure);
+            assert_eq!(status, StatusCode::ErrOsFailure);
         }
         other => panic!("Expected DeviceError(OsFailure), got: {other:?}"),
     }
 
     // Verify slave did NOT update device info (original IP should remain)
-    let info = fixture.slave.device_info.read_device_info();
+    let info = fixture.slave.device_info.read_device_info().unwrap();
     assert_eq!(info.ip_address, vec![192, 168, 1, 100]);
 }
 
@@ -383,11 +382,11 @@ fn create_slave_with_device_info(
 ) -> SlaveInstance {
     let device_info: Arc<dyn DeviceInfoAccess> = Arc::new(MockDeviceInfo::new(mac));
     {
-        let mut info = device_info.read_device_info();
+        let mut info = device_info.read_device_info().unwrap();
         info.vendor_id = vendor_id;
         info.device_id = device_id;
         info.serial_number = serial_number;
-        device_info.write_device_info(info);
+        let _ = device_info.write_device_info(info);
     }
 
     SlaveInstance {

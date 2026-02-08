@@ -32,6 +32,8 @@ enum StatusCode {
   ERR_ALREADY_RUNNING = 17;
   ERR_OS_FAILURE = 18;
   ERR_IP_CONFLICT = 19;
+  ERR_FRAME_PARSING = 20;
+  ERR_FRAME_WITH_ERROR_STATUS = 21;
 }
 
 enum SyncStatus {

@@ -32,7 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_state_manager = state_manager.clone();
 
     let status_store = DeviceStatusStore::new();
-    status_store.spawn_background_tasks(hardware.clone());
+    if let Err(code) = status_store.spawn_background_tasks(hardware.clone()) {
+        debug!("Failed to spawn background tasks: {code:?}");
+        state_manager.set_target_state(DeviceState::Error).unwrap();
+    }
 
     let token_store = TokenStore::from_env()?;
     let stream_store = StreamStore::new();

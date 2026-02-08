@@ -12,7 +12,7 @@ test-utils = ["common/test-utils"]
 common = { path = "../common" }
 
 # Async Runtime (Required for gRPC)
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "time"] }
 
 # gRPC Dependencies
 tonic = "0.12"

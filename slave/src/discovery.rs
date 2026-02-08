@@ -13,8 +13,7 @@
 
 use common::discovery_types::{ETHERTYPE_SDCP, SDCP_HEADER_SIZE, SdcpHeader, SdcpOpCode, Tlv};
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
-use common::slave_api::{DeviceInfo, IpSource};
-use common::status_codes::StatusCode;
+use common::slave_api::{DeviceInfo, IpSource, StatusCode};
 use log::{info, warn};
 use pnet::datalink::{self, Channel, DataLinkSender, NetworkInterface};
 use pnet::packet::Packet;
@@ -138,6 +137,40 @@ pub fn handle_packet(
     }
 }
 
+fn default_device_info() -> DeviceInfo {
+    DeviceInfo {
+        mac_address: vec![0, 0, 0, 0, 0, 0],
+        ip_address: vec![0, 0, 0, 0],
+        ip_source: IpSource::Unspecified.into(),
+        netmask: vec![255, 255, 255, 0],
+        gateway: vec![0, 0, 0, 0],
+        vendor_id: 0,
+        device_id: 0,
+        serial_number: 0,
+        firmware_version: 0,
+        capabilities: 0,
+    }
+}
+
+fn send_status_response(
+    transmitter: &mut dyn datalink::DataLinkSender,
+    interface: &NetworkInterface,
+    ethernet_frame: &EthernetPacket<'_>,
+    op_code: SdcpOpCode,
+    transaction_id: u16,
+    code: StatusCode,
+) {
+    let status_tlv = Tlv::status_report(code);
+    send_response(
+        transmitter,
+        interface,
+        ethernet_frame.get_source(),
+        op_code,
+        transaction_id,
+        status_tlv,
+    );
+}
+
 fn handle_get_ip_request(
     header: &SdcpHeader,
     ethernet_frame: &EthernetPacket<'_>,
@@ -150,18 +183,9 @@ fn handle_get_ip_request(
         ethernet_frame.get_source()
     );
 
-    let device_info = device_info_access.read_device_info().unwrap_or(DeviceInfo {
-        mac_address: vec![0, 0, 0, 0, 0, 0],
-        ip_address: vec![0, 0, 0, 0],
-        ip_source: IpSource::Unspecified.into(),
-        netmask: vec![255, 255, 255, 0],
-        gateway: vec![0, 0, 0, 0],
-        vendor_id: 0,
-        device_id: 0,
-        serial_number: 0,
-        firmware_version: 0,
-        capabilities: 0,
-    });
+    let device_info = device_info_access
+        .read_device_info()
+        .unwrap_or(default_device_info());
 
     let ip: [u8; 4] = device_info
         .ip_address
@@ -215,44 +239,59 @@ fn handle_set_ip_request(
             Ok(_) => {
                 info!("Successfully applied IP configuration to network interface");
 
-                let mut device_info = device_info_access.read_device_info().unwrap_or(DeviceInfo {
-                    mac_address: vec![0, 0, 0, 0, 0, 0],
-                    ip_address: vec![0, 0, 0, 0],
-                    ip_source: IpSource::Unspecified.into(),
-                    netmask: vec![255, 255, 255, 0],
-                    gateway: vec![0, 0, 0, 0],
-                    vendor_id: 0,
-                    device_id: 0,
-                    serial_number: 0,
-                    firmware_version: 0,
-                    capabilities: 0,
-                });
+                let mut device_info = match device_info_access.read_device_info() {
+                    Ok(info) => info,
+                    Err(code) => {
+                        warn!("Failed to read device info: {code:?}");
+                        send_status_response(
+                            transmitter,
+                            interface,
+                            ethernet_frame,
+                            SdcpOpCode::SetIpRes,
+                            header.transaction_id,
+                            code,
+                        );
+                        return;
+                    }
+                };
                 device_info.ip_address = ip_config.ip.to_vec();
                 device_info.netmask = ip_config.netmask.to_vec();
                 device_info.gateway = ip_config.gateway.to_vec();
-                device_info_access.write_device_info(device_info);
+                match device_info_access.write_device_info(device_info) {
+                    Ok(info) => info,
+                    Err(code) => {
+                        warn!("Failed to read device info: {code:?}");
+                        send_status_response(
+                            transmitter,
+                            interface,
+                            ethernet_frame,
+                            SdcpOpCode::SetIpRes,
+                            header.transaction_id,
+                            code,
+                        );
+                        return;
+                    }
+                };
 
-                let status_tlv = Tlv::status_report(StatusCode::NoError);
-                send_response(
+                send_status_response(
                     transmitter,
                     interface,
-                    ethernet_frame.get_source(),
+                    ethernet_frame,
                     SdcpOpCode::SetIpRes,
                     header.transaction_id,
-                    status_tlv,
+                    StatusCode::NoError,
                 );
             }
             Err(e) => {
                 warn!("Failed to apply IP configuration: {e:?}");
 
-                let status_tlv = Tlv::status_report(StatusCode::OsFailure);
-                send_response(
+                send_status_response(
                     transmitter,
                     interface,
-                    ethernet_frame.get_source(),
+                    ethernet_frame,
                     SdcpOpCode::SetIpRes,
                     header.transaction_id,
-                    status_tlv,
+                    StatusCode::ErrOsFailure,
                 );
             }
         }
@@ -268,18 +307,9 @@ fn handle_discovery_request(
 ) {
     info!("Received DISCOVER_REQ from {}", ethernet_frame.get_source());
 
-    let device_info = device_info_access.read_device_info().unwrap_or(DeviceInfo {
-        mac_address: vec![0, 0, 0, 0, 0, 0],
-        ip_address: vec![0, 0, 0, 0],
-        ip_source: IpSource::Unspecified.into(),
-        netmask: vec![255, 255, 255, 0],
-        gateway: vec![0, 0, 0, 0],
-        vendor_id: 0,
-        device_id: 0,
-        serial_number: 0,
-        firmware_version: 0,
-        capabilities: 0,
-    });
+    let device_info = device_info_access
+        .read_device_info()
+        .unwrap_or(default_device_info());
     let tlv = Tlv::device_info(
         device_info.vendor_id as u16,
         device_info.device_id as u16,
@@ -522,7 +552,7 @@ mod tests {
 
         let mut updated = initial;
         updated.ip_address = vec![10, 0, 0, 1];
-        device_info.write_device_info(updated);
+        let _ = device_info.write_device_info(updated);
 
         let persisted = device_info.read_device_info().unwrap();
         assert_eq!(persisted.ip_address, vec![10, 0, 0, 1]);

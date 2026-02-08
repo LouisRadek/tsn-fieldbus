@@ -38,7 +38,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use pnet::util::MacAddr;
 use std::io::{self, Cursor, Read};
 
-use crate::{slave_api::IpSource, status_codes::StatusCode};
+use crate::slave_api::{IpSource, StatusCode};
 
 pub const ETHERTYPE_SDCP: u16 = 0x88B5;
 pub const SDCP_VERSION: u8 = 0x01;
@@ -179,7 +179,7 @@ impl std::fmt::Display for DiscoveryError {
             }
             DiscoveryError::Timeout => write!(f, "Timeout waiting for response"),
             DiscoveryError::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
-            DiscoveryError::DeviceError(code) => write!(f, "Device error: {code}"),
+            DiscoveryError::DeviceError(code) => write!(f, "Device error: {code:?}"),
             DiscoveryError::IoError(e) => write!(f, "I/O error: {e}"),
         }
     }
@@ -417,8 +417,7 @@ impl Tlv {
             return None;
         }
 
-        let status_code = self.value[0];
-        Some(StatusCode::from(status_code))
+        StatusCode::try_from(self.value[0] as i32).ok()
     }
 
     /// Parse IP report from this TLV
@@ -483,9 +482,9 @@ mod tests {
         );
         assert!(DiscoveryError::Timeout.to_string().contains("Timeout"));
         assert!(
-            DiscoveryError::DeviceError(StatusCode::IpConflict)
+            DiscoveryError::DeviceError(StatusCode::ErrIpConflict)
                 .to_string()
-                .contains("IP Conflict")
+                .contains("IpConflict")
         );
     }
 
@@ -562,10 +561,10 @@ mod tests {
 
     #[test]
     fn test_tlv_status_report() {
-        let tlv = Tlv::status_report(StatusCode::IpConflict);
+        let tlv = Tlv::status_report(StatusCode::ErrIpConflict);
 
         assert_eq!(tlv.t_type, TLV_TYPE_STATUS_REPORT);
-        assert_eq!(tlv.parse_status_report(), Some(StatusCode::IpConflict));
+        assert_eq!(tlv.parse_status_report(), Some(StatusCode::ErrIpConflict));
     }
 
     #[test]

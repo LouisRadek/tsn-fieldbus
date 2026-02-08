@@ -25,7 +25,7 @@ use common::discovery_types::{
     DiscoveredDevice, DiscoveryError, ETHERTYPE_SDCP, IpReport, SDCP_HEADER_SIZE, SdcpHeader,
     SdcpOpCode, Tlv,
 };
-use common::status_codes::StatusCode;
+use common::slave_api::StatusCode;
 use log::{debug, info, warn};
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use pnet::packet::Packet;
@@ -314,7 +314,7 @@ impl DiscoveryMaster {
                             info!("IP configuration successfully applied to {target_mac}");
                             Ok(())
                         } else {
-                            warn!("Device {target_mac} rejected IP config: {status}");
+                            warn!("Device {target_mac} rejected IP config: {status:?}");
                             Err(DiscoveryError::DeviceError(status))
                         };
                     }
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn test_set_ip_config_ip_conflict() {
         let mut master = create_test_master_with_responses(vec![default_set_ip_response(
-            StatusCode::IpConflict,
+            StatusCode::ErrIpConflict,
         )]);
 
         let result = master.set_ip_config(
@@ -785,7 +785,7 @@ mod tests {
             Some(TEST_TIMEOUT),
         );
 
-        assert_device_error(result, StatusCode::IpConflict);
+        assert_device_error(result, StatusCode::ErrIpConflict);
     }
 
     #[test]
@@ -805,8 +805,9 @@ mod tests {
 
     #[test]
     fn test_set_ip_config_os_failure() {
-        let mut master =
-            create_test_master_with_responses(vec![default_set_ip_response(StatusCode::OsFailure)]);
+        let mut master = create_test_master_with_responses(vec![default_set_ip_response(
+            StatusCode::ErrOsFailure,
+        )]);
 
         let result = master.set_ip_config(
             SLAVE_MAC,
@@ -816,7 +817,7 @@ mod tests {
             Some(TEST_TIMEOUT),
         );
 
-        assert_device_error(result, StatusCode::OsFailure);
+        assert_device_error(result, StatusCode::ErrOsFailure);
     }
 
     #[test]

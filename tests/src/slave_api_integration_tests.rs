@@ -4,7 +4,7 @@
 //! and exercise all public RPC endpoints through the master-side client.
 
 use common::slave_api::{
-    DeviceState, Direction, StatusCode, StreamConfig, StreamContent, SubscribeStatusRequest,
+    DeviceState, Direction, Position, StatusCode, StreamConfig, SubscribeStatusRequest,
 };
 use common::stream_store::StreamStore;
 use master::SlaveApiClient;
@@ -184,7 +184,7 @@ async fn test_configure_streams_preop_only_and_validation() {
             vlan_id_pcp: 0x0001,
             cycle_time_nano: 1_000_000,
             direction: Direction::Input as i32,
-            stream_content: Some(StreamContent {
+            stream_content: Some(Position {
                 byte_offset: 0,
                 bit_offset: 0,
                 bit_len: 16,
@@ -210,7 +210,7 @@ async fn test_configure_streams_preop_only_and_validation() {
             vlan_id_pcp: 0x0001,
             cycle_time_nano: 1_000_000,
             direction: Direction::Input as i32,
-            stream_content: Some(StreamContent {
+            stream_content: Some(Position {
                 byte_offset: 0,
                 bit_offset: 0,
                 bit_len: 16,
@@ -228,7 +228,7 @@ async fn test_configure_streams_preop_only_and_validation() {
                 vlan_id_pcp: 0x0001,
                 cycle_time_nano: 1_000_000,
                 direction: Direction::Input as i32,
-                stream_content: Some(StreamContent {
+                stream_content: Some(Position {
                     byte_offset: 0,
                     bit_offset: 0,
                     bit_len: 16,
@@ -240,7 +240,7 @@ async fn test_configure_streams_preop_only_and_validation() {
                 vlan_id_pcp: 0x0001,
                 cycle_time_nano: 1_000_000,
                 direction: Direction::Input as i32,
-                stream_content: Some(StreamContent {
+                stream_content: Some(Position {
                     byte_offset: 0,
                     bit_offset: 0,
                     bit_len: 16,
