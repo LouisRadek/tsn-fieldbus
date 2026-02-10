@@ -166,6 +166,7 @@ pub enum DiscoveryError {
     InvalidResponse(String),
     DeviceError(StatusCode),
     IoError(io::Error),
+    InvalidState,
 }
 
 impl std::fmt::Display for DiscoveryError {
@@ -181,6 +182,7 @@ impl std::fmt::Display for DiscoveryError {
             DiscoveryError::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
             DiscoveryError::DeviceError(code) => write!(f, "Device error: {code:?}"),
             DiscoveryError::IoError(e) => write!(f, "I/O error: {e}"),
+            DiscoveryError::InvalidState => write!(f, "Invalid State"),
         }
     }
 }

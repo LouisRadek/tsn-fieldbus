@@ -25,7 +25,8 @@ use common::discovery_types::{
     DiscoveredDevice, DiscoveryError, ETHERTYPE_SDCP, IpReport, SDCP_HEADER_SIZE, SdcpHeader,
     SdcpOpCode, Tlv,
 };
-use common::slave_api::StatusCode;
+use common::slave_api::{DeviceState, StatusCode};
+use common::state_machine::DeviceStateManager;
 use log::{debug, info, warn};
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use pnet::packet::Packet;
@@ -49,6 +50,7 @@ const MIN_FRAME_SIZE: usize = 60;
 /// and IP configuration. Maintains a cache of discovered devices.
 pub struct DiscoveryMaster {
     interface: NetworkInterface,
+    device_state_manager: DeviceStateManager,
     transmitter: Box<dyn DataLinkSender>,
     receiver: Box<dyn DataLinkReceiver>,
     discovered_devices: HashMap<MacAddr, DiscoveredDevice>,
@@ -66,7 +68,10 @@ impl DiscoveryMaster {
     ///
     /// Returns `DiscoveryError::InterfaceNotFound` if the interface doesn't exist,
     /// or `DiscoveryError::ChannelCreationFailed` if the raw socket cannot be opened.
-    pub fn new(interface_name: &str) -> Result<Self, DiscoveryError> {
+    pub fn new(
+        interface_name: &str,
+        device_state_manager: DeviceStateManager,
+    ) -> Result<Self, DiscoveryError> {
         let interfaces = datalink::interfaces();
         let interface = interfaces
             .into_iter()
@@ -90,6 +95,7 @@ impl DiscoveryMaster {
 
         Ok(Self {
             interface,
+            device_state_manager,
             transmitter,
             receiver,
             discovered_devices: HashMap::new(),
@@ -105,11 +111,13 @@ impl DiscoveryMaster {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_with_mocks(
         interface: NetworkInterface,
+        device_state_manager: DeviceStateManager,
         transmitter: Box<dyn DataLinkSender>,
         receiver: Box<dyn DataLinkReceiver>,
     ) -> Self {
         Self {
             interface,
+            device_state_manager,
             transmitter,
             receiver,
             discovered_devices: HashMap::new(),
@@ -154,6 +162,10 @@ impl DiscoveryMaster {
         &mut self,
         timeout: Option<Duration>,
     ) -> Result<Vec<DiscoveredDevice>, DiscoveryError> {
+        if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
+            return Err(DiscoveryError::InvalidState);
+        }
+
         let timeout = timeout.unwrap_or(DEFAULT_DISCOVERY_TIMEOUT);
         let transaction_id = self.next_transaction_id();
 
@@ -224,6 +236,10 @@ impl DiscoveryMaster {
         target_mac: MacAddr,
         timeout: Option<Duration>,
     ) -> Result<IpReport, DiscoveryError> {
+        if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
+            return Err(DiscoveryError::InvalidState);
+        }
+
         let timeout = timeout.unwrap_or(DEFAULT_UNICAST_TIMEOUT);
         let transaction_id = self.next_transaction_id();
 
@@ -279,6 +295,10 @@ impl DiscoveryMaster {
         gateway: [u8; 4],
         timeout: Option<Duration>,
     ) -> Result<(), DiscoveryError> {
+        if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
+            return Err(DiscoveryError::InvalidState);
+        }
+
         let timeout = timeout.unwrap_or(DEFAULT_UNICAST_TIMEOUT);
         let transaction_id = self.next_transaction_id();
 
@@ -556,13 +576,22 @@ mod tests {
 
     fn create_test_master() -> DiscoveryMaster {
         let interface = create_mock_interface("mock0", TEST_MAC);
+        let device_state_manager = DeviceStateManager::new();
+        let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
         let sender = MockDataLinkSender::new();
         let receiver = MockDataLinkReceiver::new();
-        DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver))
+        DiscoveryMaster::new_with_mocks(
+            interface,
+            device_state_manager,
+            Box::new(sender),
+            Box::new(receiver),
+        )
     }
 
     fn create_test_master_with_responses(responses: Vec<Vec<u8>>) -> DiscoveryMaster {
         let interface = create_mock_interface("mock0", TEST_MAC);
+        let device_state_manager = DeviceStateManager::new();
+        let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
         let sender = MockDataLinkSender::new();
         let receiver = MockDataLinkReceiver::new();
 
@@ -570,7 +599,12 @@ mod tests {
             receiver.add_response_frame(response);
         }
 
-        DiscoveryMaster::new_with_mocks(interface, Box::new(sender), Box::new(receiver))
+        DiscoveryMaster::new_with_mocks(
+            interface,
+            device_state_manager,
+            Box::new(sender),
+            Box::new(receiver),
+        )
     }
 
     fn default_discovery_response() -> Vec<u8> {

@@ -18,7 +18,8 @@
 use crate::mock_network::{FrameQueue, MockNetwork, MockReceiver, MockSender};
 use common::discovery_types::{DiscoveryError, ETHERTYPE_SDCP, SdcpHeader};
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
-use common::slave_api::{IpSource, StatusCode};
+use common::slave_api::{DeviceState, IpSource, StatusCode};
+use common::state_machine::DeviceStateManager;
 use common::test_mocks::{MockDeviceInfo, MockNetworkInterface, create_mock_interface};
 use master::DiscoveryMaster;
 use pnet::datalink::{DataLinkReceiver, NetworkInterface};
@@ -81,9 +82,11 @@ impl TestFixture {
 
     fn create_master(mac: MacAddr, tx_queue: FrameQueue, rx_queue: FrameQueue) -> DiscoveryMaster {
         let interface = create_mock_interface("master0", mac);
+        let device_state_manager = DeviceStateManager::new();
+        let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
         let tx = MockSender::new(tx_queue);
         let rx = MockReceiver::new(rx_queue);
-        DiscoveryMaster::new_with_mocks(interface, Box::new(tx), Box::new(rx))
+        DiscoveryMaster::new_with_mocks(interface, device_state_manager, Box::new(tx), Box::new(rx))
     }
 }
 

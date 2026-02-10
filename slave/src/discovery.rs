@@ -13,7 +13,8 @@
 
 use common::discovery_types::{ETHERTYPE_SDCP, SDCP_HEADER_SIZE, SdcpHeader, SdcpOpCode, Tlv};
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
-use common::slave_api::{DeviceInfo, IpSource, StatusCode};
+use common::slave_api::{DeviceInfo, DeviceState, IpSource, StatusCode};
+use common::state_machine::DeviceStateManager;
 use log::{info, warn};
 use pnet::datalink::{self, Channel, DataLinkSender, NetworkInterface};
 use pnet::packet::Packet;
@@ -32,6 +33,7 @@ use std::{cmp, thread};
 /// * `device_info_access` - Trait object implementing `DeviceInfoAccess` for reading/writing device info
 pub fn start_discovery_listener(
     interface_name: &str,
+    device_state_manager: DeviceStateManager,
     device_info_access: Arc<dyn DeviceInfoAccess>,
     network_interface_access: Arc<dyn NetworkInterfaceAccess>,
 ) {
@@ -54,6 +56,10 @@ pub fn start_discovery_listener(
 
     thread::spawn(move || {
         loop {
+            if device_state_manager.get_state() != DeviceState::DiscoverySync {
+                break;
+            }
+
             match receiver.next() {
                 Ok(packet) => {
                     let ethernet_frame = EthernetPacket::new(packet).unwrap();
