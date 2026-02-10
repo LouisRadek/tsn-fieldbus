@@ -234,6 +234,8 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "env_logger",
+ "log",
  "pnet",
  "prost",
  "protobuf-src",

@@ -16,6 +16,7 @@ use common::slave_api::{
     GetLogRequest, GetLogResponse, GetTokenRequest, GetTokenResponse, ProcessDataLayoutResponse,
     ProcessVariable, StatusCode, StatusResponse, StreamConfig, SubscribeStatusRequest,
 };
+use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
 use log::{debug, info};
 use std::collections::HashSet;
@@ -26,7 +27,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::{DeviceStateManager, DeviceStatusStore, TokenStore};
+use crate::{DeviceStatusStore, TokenStore};
 
 const TOKEN_HEADER_NAME: &str = "token";
 const TOKEN_TTL_SECONDS: u64 = 600;

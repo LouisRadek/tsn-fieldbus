@@ -6,11 +6,10 @@
 use common::slave_api::{
     DeviceState, Direction, Position, StatusCode, StreamConfig, SubscribeStatusRequest,
 };
+use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
 use master::SlaveApiClient;
-use slave::{
-    DeviceStateManager, DeviceStatusStore, DummyHardware, TokenStore, start_slave_api_server,
-};
+use slave::{DeviceStatusStore, DummyHardware, TokenStore, start_slave_api_server};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{Arc, Once};
 use std::time::Duration;

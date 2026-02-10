@@ -21,13 +21,13 @@ use common::l2_utils::{
     build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet,
     parse_destination_mac, ticks_per_cycle, tolerance_ticks,
 };
-use common::slave_api::{Direction, StatusCode, StreamConfig};
+use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
+use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
 use log::{debug, error, warn};
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -35,26 +35,21 @@ use tokio::runtime::Handle;
 use tokio::time;
 
 pub struct L2HandlerHandle {
-    stop: Arc<AtomicBool>,
-    sender: Option<JoinHandle<()>>,
-    receiver: Option<JoinHandle<()>>,
+    sender: JoinHandle<()>,
+    receiver: JoinHandle<()>,
 }
 
 impl L2HandlerHandle {
-    pub fn stop_and_join(self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.sender {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.receiver {
-            let _ = handle.join();
-        }
+    pub fn join(self) {
+        let _ = self.sender.join();
+        let _ = self.receiver.join();
     }
 }
 
 pub fn start_l2_handler(
     interface_name: &str,
     stream_store: StreamStore,
+    device_state_manager: DeviceStateManager,
     process_image: Arc<dyn ProcessImageAccess>,
 ) -> Result<L2HandlerHandle, StatusCode> {
     let interface = find_interface(interface_name);
@@ -70,35 +65,24 @@ pub fn start_l2_handler(
         }
     };
 
-    let incoming_streams = stream_store.get_streams_by_direction(Direction::Input);
-    let outgoing_streams = stream_store.get_streams_by_direction(Direction::Output);
-    let stop = Arc::new(AtomicBool::new(false));
+    let input_streams = stream_store.get_streams_by_direction(Direction::Input);
+    let output_streams = stream_store.get_streams_by_direction(Direction::Output);
 
-    let receiver_handle = if !incoming_streams.is_empty() {
-        Some(spawn_receiver_thread(
-            receiver,
-            incoming_streams,
-            process_image.clone(),
-            Arc::clone(&stop),
-        ))
-    } else {
-        None
-    };
-
-    let sender_handle = if !outgoing_streams.is_empty() {
-        Some(spawn_sender_thread(
-            transmitter,
-            interface,
-            outgoing_streams,
-            process_image,
-            Arc::clone(&stop),
-        )?)
-    } else {
-        None
-    };
+    let receiver_handle = spawn_receiver_thread(
+        receiver,
+        input_streams,
+        device_state_manager.clone(),
+        process_image.clone(),
+    );
+    let sender_handle = spawn_sender_thread(
+        transmitter,
+        interface,
+        output_streams,
+        device_state_manager,
+        process_image,
+    )?;
 
     Ok(L2HandlerHandle {
-        stop,
         sender: sender_handle,
         receiver: receiver_handle,
     })
@@ -110,37 +94,27 @@ pub fn start_l2_handler_with_mocks(
     transmitter: Box<dyn DataLinkSender>,
     receiver: Box<dyn DataLinkReceiver>,
     stream_store: StreamStore,
+    device_state_manager: DeviceStateManager,
     process_image: Arc<dyn ProcessImageAccess>,
 ) -> Result<L2HandlerHandle, StatusCode> {
-    let incoming_streams = stream_store.get_streams_by_direction(Direction::Input);
-    let outgoing_streams = stream_store.get_streams_by_direction(Direction::Output);
-    let stop = Arc::new(AtomicBool::new(false));
+    let input_streams = stream_store.get_streams_by_direction(Direction::Input);
+    let output_streams = stream_store.get_streams_by_direction(Direction::Output);
 
-    let receiver_handle = if !incoming_streams.is_empty() {
-        Some(spawn_receiver_thread(
-            receiver,
-            incoming_streams,
-            process_image.clone(),
-            Arc::clone(&stop),
-        ))
-    } else {
-        None
-    };
-
-    let sender_handle = if !outgoing_streams.is_empty() {
-        Some(spawn_sender_thread(
-            transmitter,
-            interface,
-            outgoing_streams,
-            process_image,
-            Arc::clone(&stop),
-        )?)
-    } else {
-        None
-    };
+    let receiver_handle = spawn_receiver_thread(
+        receiver,
+        input_streams,
+        device_state_manager.clone(),
+        process_image.clone(),
+    );
+    let sender_handle = spawn_sender_thread(
+        transmitter,
+        interface,
+        output_streams,
+        device_state_manager,
+        process_image,
+    )?;
 
     Ok(L2HandlerHandle {
-        stop,
         sender: sender_handle,
         receiver: receiver_handle,
     })
@@ -149,8 +123,8 @@ pub fn start_l2_handler_with_mocks(
 fn spawn_receiver_thread(
     mut receiver: Box<dyn DataLinkReceiver>,
     streams: Vec<StreamConfig>,
+    device_state_manager: DeviceStateManager,
     process_image: Arc<dyn ProcessImageAccess>,
-    stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     let mut stream_map = HashMap::new();
     for stream in streams {
@@ -161,7 +135,11 @@ fn spawn_receiver_thread(
         let mut last_cycle_counter: HashMap<u16, u16> = HashMap::new();
 
         loop {
-            if stop.load(Ordering::Relaxed) {
+            let state = device_state_manager.get_state();
+            if state == DeviceState::SafeOp {
+                thread::sleep(Duration::from_micros(500));
+                continue;
+            } else if state != DeviceState::Op {
                 break;
             }
 
@@ -224,8 +202,8 @@ fn spawn_sender_thread(
     mut transmitter: Box<dyn DataLinkSender>,
     interface: NetworkInterface,
     streams: Vec<StreamConfig>,
+    device_state_manager: DeviceStateManager,
     process_image: Arc<dyn ProcessImageAccess>,
-    stop: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, StatusCode> {
     let runtime = Handle::current();
     let source_mac = match interface.mac {
@@ -245,14 +223,16 @@ fn spawn_sender_thread(
         runtime.block_on(async move {
             let mut interval = time::interval(Duration::from_nanos(base_cycle_ns as u64));
             loop {
-                if stop.load(Ordering::Relaxed) {
+                let state = device_state_manager.get_state();
+                if state != DeviceState::Op && state != DeviceState::SafeOp {
                     break;
                 }
 
                 interval.tick().await;
 
                 for stream in &streams {
-                    if stop.load(Ordering::Relaxed) {
+                    let state = device_state_manager.get_state();
+                    if state != DeviceState::Op && state != DeviceState::SafeOp {
                         break;
                     }
 

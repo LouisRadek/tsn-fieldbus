@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Device state machine.
 //!
 //! This module implements a finite state machine for controlling the lifecycle
@@ -21,7 +20,7 @@
 //! access to the device state. Multiple threads can safely call state transition methods
 //! concurrently.
 
-use common::slave_api::{DeviceState, StatusCode};
+use crate::slave_api::{DeviceState, StatusCode};
 use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 

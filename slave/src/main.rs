@@ -1,11 +1,10 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
 use common::{hardware_abstraction::ProcessImageAccess, slave_api::DeviceState};
 use log::{debug, info};
-use slave::{
-    DeviceStateManager, DeviceStatusStore, DummyHardware, TokenStore, start_slave_api_server,
-};
+use slave::{DeviceStatusStore, DummyHardware, TokenStore, start_slave_api_server};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

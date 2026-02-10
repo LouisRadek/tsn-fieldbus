@@ -3,6 +3,7 @@
 use crate::mock_network::MockNetwork;
 use common::hardware_abstraction::ProcessImageAccess;
 use common::slave_api::{DeviceState, Direction, Position, StatusCode, StreamConfig};
+use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
 use common::test_mocks::create_mock_interface;
 use master::start_l2_handler_with_mocks as start_master_l2_handler;
@@ -119,6 +120,11 @@ async fn test_l2_handler_bidirectional_streams() {
     master_process_image.set_output(&[0x01]);
     slave_process_image.set_output(&[0x02]);
 
+    let master_device_state_manager = DeviceStateManager::new();
+    let _ = master_device_state_manager.set_target_state(DeviceState::DiscoverySync);
+    let _ = master_device_state_manager.set_target_state(DeviceState::PreOp);
+    let _ = master_device_state_manager.set_target_state(DeviceState::SafeOp);
+    let _ = master_device_state_manager.set_target_state(DeviceState::Op);
     let status_store = DeviceStatusStore::new();
     status_store.update_state(DeviceState::Op).await;
 
@@ -127,6 +133,7 @@ async fn test_l2_handler_bidirectional_streams() {
         Box::new(master_tx),
         Box::new(master_rx),
         master_store,
+        master_device_state_manager.clone(),
         Arc::clone(&master_process_image_access),
     )
     .expect("start master l2 handler");
@@ -142,10 +149,11 @@ async fn test_l2_handler_bidirectional_streams() {
 
     sleep(Duration::from_millis(50)).await;
     status_store.update_state(DeviceState::Shutdown).await;
+    let _ = master_device_state_manager.set_target_state(DeviceState::Shutdown);
 
     assert_eq!(slave_process_image.read_input()[0], 0x01);
     assert_eq!(master_process_image.read_input()[0], 0x02);
 
-    master_handle.stop_and_join();
+    master_handle.join();
     slave_handle.join();
 }

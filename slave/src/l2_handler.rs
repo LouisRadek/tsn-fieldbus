@@ -133,7 +133,10 @@ fn spawn_receiver_thread(
         loop {
             let status = runtime.block_on(status_store.get_status());
             let state = DeviceState::try_from(status.state).unwrap_or(DeviceState::Init);
-            if state != DeviceState::Op {
+            if state == DeviceState::SafeOp {
+                thread::sleep(Duration::from_micros(500));
+                continue;
+            } else if state != DeviceState::Op {
                 break;
             }
 
