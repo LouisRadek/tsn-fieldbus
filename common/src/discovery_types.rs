@@ -157,44 +157,6 @@ impl SdcpHeader {
     }
 }
 
-/// Error types for discovery operations
-#[derive(Debug)]
-pub enum DiscoveryError {
-    InterfaceNotFound(String),
-    ChannelCreationFailed(String),
-    Timeout,
-    InvalidResponse(String),
-    DeviceError(StatusCode),
-    IoError(io::Error),
-    InvalidState,
-}
-
-impl std::fmt::Display for DiscoveryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DiscoveryError::InterfaceNotFound(name) => {
-                write!(f, "Network interface not found: {name}")
-            }
-            DiscoveryError::ChannelCreationFailed(msg) => {
-                write!(f, "Failed to create datalink channel: {msg}")
-            }
-            DiscoveryError::Timeout => write!(f, "Timeout waiting for response"),
-            DiscoveryError::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
-            DiscoveryError::DeviceError(code) => write!(f, "Device error: {code:?}"),
-            DiscoveryError::IoError(e) => write!(f, "I/O error: {e}"),
-            DiscoveryError::InvalidState => write!(f, "Invalid State"),
-        }
-    }
-}
-
-impl std::error::Error for DiscoveryError {}
-
-impl From<io::Error> for DiscoveryError {
-    fn from(err: io::Error) -> Self {
-        DiscoveryError::IoError(err)
-    }
-}
-
 /// Represents a discovered device with its network and identification information
 #[derive(Debug, Clone)]
 pub struct DiscoveredDevice {
@@ -473,21 +435,6 @@ mod tests {
         assert_eq!(device.vendor_id, TEST_VENDOR_ID);
         assert_eq!(device.device_id, TEST_DEVICE_ID);
         assert_eq!(device.serial_number, TEST_SERIAL);
-    }
-
-    #[test]
-    fn test_discovery_error_display() {
-        assert!(
-            DiscoveryError::InterfaceNotFound("eth0".to_string())
-                .to_string()
-                .contains("eth0")
-        );
-        assert!(DiscoveryError::Timeout.to_string().contains("Timeout"));
-        assert!(
-            DiscoveryError::DeviceError(StatusCode::ErrIpConflict)
-                .to_string()
-                .contains("IpConflict")
-        );
     }
 
     #[test]

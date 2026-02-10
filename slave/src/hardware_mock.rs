@@ -77,7 +77,7 @@ impl DeviceInfoAccess for DummyHardware {
         if let Ok(lock) = self.device_info.read() {
             Ok(lock.clone())
         } else {
-            Err(StatusCode::ErrOsFailure)
+            Err(StatusCode::ErrHardwareAccess)
         }
     }
 
@@ -86,7 +86,7 @@ impl DeviceInfoAccess for DummyHardware {
             *lock = info;
             Ok(())
         } else {
-            Err(StatusCode::ErrOsFailure)
+            Err(StatusCode::ErrHardwareAccess)
         }
     }
 }
@@ -171,7 +171,7 @@ impl ProcessImageAccess for DummyHardware {
 
             Ok(out)
         } else {
-            Err(StatusCode::ErrOsFailure)
+            Err(StatusCode::ErrHardwareAccess)
         }
     }
 
@@ -210,7 +210,7 @@ impl ProcessImageAccess for DummyHardware {
 
             Ok(())
         } else {
-            Err(StatusCode::ErrOsFailure)
+            Err(StatusCode::ErrHardwareAccess)
         }
     }
 }
@@ -222,7 +222,7 @@ impl TemperatureSensorAccess for DummyHardware {
             let low = lock.get(1).copied().unwrap_or(0);
             Ok(i16::from_be_bytes([high, low]))
         } else {
-            Err(StatusCode::ErrOsFailure)
+            Err(StatusCode::ErrHardwareAccess)
         }
     }
 }

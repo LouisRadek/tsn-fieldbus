@@ -57,11 +57,11 @@ pub fn start_l2_handler(
         Ok(Channel::Ethernet(transmitter, receiver)) => (transmitter, receiver),
         Ok(_) => {
             error!("Unhandled Channel");
-            return Err(StatusCode::ErrOsFailure);
+            return Err(StatusCode::ErrSocketChannel);
         }
         Err(e) => {
             error!("Error creating the channel: {e}");
-            return Err(StatusCode::ErrOsFailure);
+            return Err(StatusCode::ErrSocketChannel);
         }
     };
 
@@ -208,7 +208,7 @@ fn spawn_sender_thread(
     let runtime = Handle::current();
     let source_mac = match interface.mac {
         Some(mac) => mac,
-        None => return Err(StatusCode::ErrOsFailure),
+        None => return Err(StatusCode::ErrSocketChannel),
     };
     let cycle_times = streams
         .iter()

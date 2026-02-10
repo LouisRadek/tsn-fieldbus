@@ -297,7 +297,7 @@ fn handle_set_ip_request(
                     ethernet_frame,
                     SdcpOpCode::SetIpRes,
                     header.transaction_id,
-                    StatusCode::ErrOsFailure,
+                    StatusCode::ErrHardwareAccess,
                 );
             }
         }

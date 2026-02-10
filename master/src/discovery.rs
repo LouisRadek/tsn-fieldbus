@@ -22,8 +22,7 @@
 //! For concurrent access, wrap it in appropriate synchronization primitives.
 
 use common::discovery_types::{
-    DiscoveredDevice, DiscoveryError, ETHERTYPE_SDCP, IpReport, SDCP_HEADER_SIZE, SdcpHeader,
-    SdcpOpCode, Tlv,
+    DiscoveredDevice, ETHERTYPE_SDCP, IpReport, SDCP_HEADER_SIZE, SdcpHeader, SdcpOpCode, Tlv,
 };
 use common::slave_api::{DeviceState, StatusCode};
 use common::state_machine::DeviceStateManager;
@@ -32,10 +31,10 @@ use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInt
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
+use std::cmp;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
-use std::{cmp, io};
 
 const BROADCAST_MAC: MacAddr = MacAddr(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -66,17 +65,16 @@ impl DiscoveryMaster {
     ///
     /// # Errors
     ///
-    /// Returns `DiscoveryError::InterfaceNotFound` if the interface doesn't exist,
-    /// or `DiscoveryError::ChannelCreationFailed` if the raw socket cannot be opened.
+    /// Returns `StatusCode::ErrSocketChannel` if the interface doesn't exist or if the raw socket cannot be opened.
     pub fn new(
         interface_name: &str,
         device_state_manager: DeviceStateManager,
-    ) -> Result<Self, DiscoveryError> {
+    ) -> Result<Self, StatusCode> {
         let interfaces = datalink::interfaces();
         let interface = interfaces
             .into_iter()
             .find(|interface| interface.name == interface_name)
-            .ok_or_else(|| DiscoveryError::InterfaceNotFound(interface_name.to_string()))?;
+            .ok_or(StatusCode::ErrSocketChannel)?;
 
         info!(
             "Initializing Discovery Master on interface: {} (MAC: {:?})",
@@ -86,11 +84,9 @@ impl DiscoveryMaster {
         let (transmitter, receiver) = match datalink::channel(&interface, Default::default()) {
             Ok(Channel::Ethernet(transmitter, receiver)) => (transmitter, receiver),
             Ok(_) => {
-                return Err(DiscoveryError::ChannelCreationFailed(
-                    "Unexpected channel type".to_string(),
-                ));
+                return Err(StatusCode::ErrSocketChannel);
             }
-            Err(e) => return Err(DiscoveryError::ChannelCreationFailed(e.to_string())),
+            Err(_e) => return Err(StatusCode::ErrSocketChannel),
         };
 
         Ok(Self {
@@ -157,13 +153,13 @@ impl DiscoveryMaster {
     ///
     /// # Errors
     ///
-    /// Returns `DiscoveryError::IoError` if packet transmission fails.
+    /// Returns `StatusCode::ErrStateConflict` if packet transmission fails.
     pub fn discover_devices(
         &mut self,
         timeout: Option<Duration>,
-    ) -> Result<Vec<DiscoveredDevice>, DiscoveryError> {
+    ) -> Result<Vec<DiscoveredDevice>, StatusCode> {
         if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
-            return Err(DiscoveryError::InvalidState);
+            return Err(StatusCode::ErrStateConflict);
         }
 
         let timeout = timeout.unwrap_or(DEFAULT_DISCOVERY_TIMEOUT);
@@ -229,15 +225,16 @@ impl DiscoveryMaster {
     ///
     /// # Errors
     ///
-    /// - `DiscoveryError::Timeout` if no response is received
-    /// - `DiscoveryError::InvalidResponse` if the response cannot be parsed
+    /// - `StatusCode::ErrTimeout` if no response is received
+    /// - `StatusCode::ErrInvalidResponse` if the response cannot be parsed
+    /// - `StatusCode::StateConflict` if the device is in the wrong state
     pub fn get_ip_config(
         &mut self,
         target_mac: MacAddr,
         timeout: Option<Duration>,
-    ) -> Result<IpReport, DiscoveryError> {
+    ) -> Result<IpReport, StatusCode> {
         if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
-            return Err(DiscoveryError::InvalidState);
+            return Err(StatusCode::ErrStateConflict);
         }
 
         let timeout = timeout.unwrap_or(DEFAULT_UNICAST_TIMEOUT);
@@ -256,13 +253,9 @@ impl DiscoveryMaster {
                     Tlv::read_from(tlv_data)
                         .ok()
                         .and_then(|tlv| tlv.parse_ip_report())
-                        .ok_or_else(|| {
-                            DiscoveryError::InvalidResponse("Failed to parse IP report".to_string())
-                        })
+                        .ok_or(StatusCode::ErrInvalidResponse)
                 } else {
-                    Err(DiscoveryError::InvalidResponse(
-                        "Response too short".to_string(),
-                    ))
+                    Err(StatusCode::ErrInvalidResponse)
                 }
             })
     }
@@ -285,8 +278,10 @@ impl DiscoveryMaster {
     ///
     /// # Errors
     ///
-    /// - `DiscoveryError::Timeout` if no response is received
-    /// - `DiscoveryError::DeviceError` with the specific status code on failure
+    /// - `StatusCode::ErrTimeout` if no response is received
+    /// - `StatusCode::ErrHardwareAccess` if the ip config could not be set
+    /// - `StatusCode::StateConflict` if the device is in the wrong state
+    /// - `StatusCode::ErrInvalidResponse` if the response can not be parsed
     pub fn set_ip_config(
         &mut self,
         target_mac: MacAddr,
@@ -294,9 +289,9 @@ impl DiscoveryMaster {
         netmask: [u8; 4],
         gateway: [u8; 4],
         timeout: Option<Duration>,
-    ) -> Result<(), DiscoveryError> {
+    ) -> Result<(), StatusCode> {
         if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
-            return Err(DiscoveryError::InvalidState);
+            return Err(StatusCode::ErrStateConflict);
         }
 
         let timeout = timeout.unwrap_or(DEFAULT_UNICAST_TIMEOUT);
@@ -335,13 +330,11 @@ impl DiscoveryMaster {
                             Ok(())
                         } else {
                             warn!("Device {target_mac} rejected IP config: {status:?}");
-                            Err(DiscoveryError::DeviceError(status))
+                            Err(StatusCode::ErrHardwareAccess)
                         };
                     }
                 }
-                Err(DiscoveryError::InvalidResponse(
-                    "Failed to parse status response".to_string(),
-                ))
+                Err(StatusCode::ErrInvalidResponse)
             })
     }
 
@@ -355,7 +348,7 @@ impl DiscoveryMaster {
         op_code: SdcpOpCode,
         transaction_id: u16,
         payload_tlv: Option<Tlv>,
-    ) -> Result<Vec<u8>, DiscoveryError> {
+    ) -> Result<Vec<u8>, StatusCode> {
         let tlv_size = payload_tlv
             .as_ref()
             .map_or(0, |tlv| 2 + tlv.length as usize);
@@ -364,23 +357,26 @@ impl DiscoveryMaster {
 
         let mut buffer = vec![0u8; buffer_size];
 
-        let mut eth_packet = MutableEthernetPacket::new(&mut buffer)
-            .ok_or_else(|| DiscoveryError::IoError(io::Error::other("Buffer too small")))?;
+        let mut eth_packet =
+            MutableEthernetPacket::new(&mut buffer).ok_or(StatusCode::ErrOsFailure)?;
 
         eth_packet.set_destination(destination);
         eth_packet.set_source(
             self.interface
                 .mac
-                .ok_or_else(|| DiscoveryError::IoError(io::Error::other("No MAC address")))?,
+                .ok_or(StatusCode::ErrSocketChannel)?,
         );
         eth_packet.set_ethertype(ethernet::EtherType(ETHERTYPE_SDCP));
 
         let mut payload = Vec::with_capacity(SDCP_HEADER_SIZE as usize + tlv_size);
         let header = SdcpHeader::new(op_code, transaction_id);
-        header.write_to(&mut payload)?;
+        header
+            .write_to(&mut payload)
+            .map_err(|_e| StatusCode::ErrOsFailure)?;
 
         if let Some(tlv) = payload_tlv {
-            tlv.write_to(&mut payload)?;
+            tlv.write_to(&mut payload)
+                .map_err(|_e| StatusCode::ErrOsFailure)?;
         }
 
         eth_packet.set_payload(&payload);
@@ -388,11 +384,11 @@ impl DiscoveryMaster {
         Ok(buffer)
     }
 
-    fn send_frame(&mut self, frame: &[u8]) -> Result<(), DiscoveryError> {
-        self.transmitter
-            .send_to(frame, None)
-            .ok_or_else(|| DiscoveryError::IoError(io::Error::other("Send failed")))?
-            .map_err(DiscoveryError::IoError)
+    fn send_frame(&mut self, frame: &[u8]) -> Result<(), StatusCode> {
+        match self.transmitter.send_to(frame, None) {
+            Some(Ok(_)) => Ok(()),
+            Some(Err(_)) | None => Err(StatusCode::ErrSocketChannel),
+        }
     }
 
     /// Attempts to receive a raw Ethernet frame without blocking.
@@ -412,7 +408,7 @@ impl DiscoveryMaster {
         expected_opcode: SdcpOpCode,
         expected_transaction_id: u16,
         timeout: Duration,
-    ) -> Result<Vec<u8>, DiscoveryError> {
+    ) -> Result<Vec<u8>, StatusCode> {
         let start = Instant::now();
 
         while start.elapsed() < timeout {
@@ -445,7 +441,7 @@ impl DiscoveryMaster {
             }
         }
 
-        Err(DiscoveryError::Timeout)
+        Err(StatusCode::ErrTimeout)
     }
 }
 
@@ -627,15 +623,6 @@ mod tests {
         create_set_ip_response(SLAVE_MAC, TEST_MAC, 1, status)
     }
 
-    fn assert_device_error(result: Result<(), DiscoveryError>, expected_status: StatusCode) {
-        match result {
-            Err(DiscoveryError::DeviceError(status)) => {
-                assert_eq!(status, expected_status);
-            }
-            _ => panic!("Expected DeviceError with {:?} status", expected_status),
-        }
-    }
-
     #[test]
     fn test_process_discover_frame_valid() {
         let frame = default_discovery_response();
@@ -767,7 +754,7 @@ mod tests {
 
         let result = master.get_ip_config(SLAVE_MAC, Some(SHORT_TIMEOUT));
 
-        assert!(matches!(result, Err(DiscoveryError::Timeout)));
+        assert!(matches!(result, Err(StatusCode::ErrTimeout)));
     }
 
     #[test]
@@ -786,7 +773,7 @@ mod tests {
 
         let result = master.get_ip_config(SLAVE_MAC, Some(SHORT_TIMEOUT));
 
-        assert!(matches!(result, Err(DiscoveryError::Timeout)));
+        assert!(matches!(result, Err(StatusCode::ErrTimeout)));
     }
 
     #[test]
@@ -808,7 +795,7 @@ mod tests {
     #[test]
     fn test_set_ip_config_ip_conflict() {
         let mut master = create_test_master_with_responses(vec![default_set_ip_response(
-            StatusCode::ErrIpConflict,
+            StatusCode::ErrHardwareAccess,
         )]);
 
         let result = master.set_ip_config(
@@ -819,7 +806,7 @@ mod tests {
             Some(TEST_TIMEOUT),
         );
 
-        assert_device_error(result, StatusCode::ErrIpConflict);
+        assert_eq!(result, Err(StatusCode::ErrHardwareAccess));
     }
 
     #[test]
@@ -834,13 +821,13 @@ mod tests {
             Some(SHORT_TIMEOUT),
         );
 
-        assert!(matches!(result, Err(DiscoveryError::Timeout)));
+        assert!(matches!(result, Err(StatusCode::ErrTimeout)));
     }
 
     #[test]
     fn test_set_ip_config_os_failure() {
         let mut master = create_test_master_with_responses(vec![default_set_ip_response(
-            StatusCode::ErrOsFailure,
+            StatusCode::ErrHardwareAccess,
         )]);
 
         let result = master.set_ip_config(
@@ -851,7 +838,7 @@ mod tests {
             Some(TEST_TIMEOUT),
         );
 
-        assert_device_error(result, StatusCode::ErrOsFailure);
+        assert_eq!(result, Err(StatusCode::ErrHardwareAccess));
     }
 
     #[test]

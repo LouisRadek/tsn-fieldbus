@@ -16,7 +16,7 @@
 //! tests to focus on the actual protocol verification.
 
 use crate::mock_network::{FrameQueue, MockNetwork, MockReceiver, MockSender};
-use common::discovery_types::{DiscoveryError, ETHERTYPE_SDCP, SdcpHeader};
+use common::discovery_types::{ETHERTYPE_SDCP, SdcpHeader};
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
 use common::slave_api::{DeviceState, IpSource, StatusCode};
 use common::state_machine::DeviceStateManager;
@@ -303,12 +303,7 @@ fn test_set_ip_config_failure() {
     );
     slave_handle.join().unwrap();
 
-    match result {
-        Err(DiscoveryError::DeviceError(status)) => {
-            assert_eq!(status, StatusCode::ErrOsFailure);
-        }
-        other => panic!("Expected DeviceError(OsFailure), got: {other:?}"),
-    }
+    assert_eq!(result, Err(StatusCode::ErrHardwareAccess));
 
     // Verify slave did NOT update device info (original IP should remain)
     let info = fixture.slave.device_info.read_device_info().unwrap();

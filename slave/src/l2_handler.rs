@@ -275,7 +275,7 @@ fn spawn_sender_thread(
                     if let Some(Err(error)) = transmitter.send_to(&frame, None) {
                         debug!("Failed to send L2 frame: {error}");
                         status_store
-                            .update_status_code(StatusCode::ErrOsFailure)
+                            .update_status_code(StatusCode::ErrSocketChannel)
                             .await;
                     }
                 }
