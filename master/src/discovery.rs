@@ -361,11 +361,7 @@ impl DiscoveryMaster {
             MutableEthernetPacket::new(&mut buffer).ok_or(StatusCode::ErrOsFailure)?;
 
         eth_packet.set_destination(destination);
-        eth_packet.set_source(
-            self.interface
-                .mac
-                .ok_or(StatusCode::ErrSocketChannel)?,
-        );
+        eth_packet.set_source(self.interface.mac.ok_or(StatusCode::ErrSocketChannel)?);
         eth_packet.set_ethertype(ethernet::EtherType(ETHERTYPE_SDCP));
 
         let mut payload = Vec::with_capacity(SDCP_HEADER_SIZE as usize + tlv_size);
