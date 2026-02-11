@@ -77,6 +77,8 @@ impl DeviceStatusStore {
         sensor: Arc<dyn TemperatureSensorAccess>,
     ) -> Result<(), StatusCode> {
         let temp_store = self.clone();
+        let current_temperatur_polling = self.current.clone();
+        let current_heartbeat_logging = self.current.clone();
 
         tokio::spawn(async move {
             info!("Temperature polling background task started");
@@ -91,6 +93,15 @@ impl DeviceStatusStore {
             };
             loop {
                 interval.tick().await;
+
+                let state = { current_temperatur_polling.clone().blocking_read().state };
+                if state == DeviceState::Error as i32 || state == DeviceState::Shutdown as i32 {
+                    warn!(
+                        "Temperatur polling backgroud task terminated, because device state is {state}"
+                    );
+                    break;
+                }
+
                 match sensor.read_temperature() {
                     Ok(temperature) => {
                         let has_to_be_published = (temperature - last_published).unsigned_abs()
@@ -115,6 +126,14 @@ impl DeviceStatusStore {
             let mut interval = time::interval(Duration::from_secs(LOG_INTERVAL_SEC as u64));
             loop {
                 interval.tick().await;
+                let state = { current_heartbeat_logging.blocking_read().state };
+                if state == DeviceState::Error as i32 || state == DeviceState::Shutdown as i32 {
+                    warn!(
+                        "Heartbeat logging backgroud task terminated, because device state is {state}"
+                    );
+                    break;
+                }
+
                 let status = log_store.get_status().await;
                 log_store.append_log(LogReason::Heartbeat, &status);
             }
