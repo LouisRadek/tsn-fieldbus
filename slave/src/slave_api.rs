@@ -18,7 +18,7 @@ use common::slave_api::{
 };
 use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
-use log::{debug, info};
+use log::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -136,7 +136,10 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
                     code: StatusCode::NoError as i32,
                 }))
             }
-            Err(code) => Ok(Response::new(StatusResponse { code: code as i32 })),
+            Err(code) => {
+                error!("Failed to set target state: {code:?}");
+                Ok(Response::new(StatusResponse { code: code as i32 }))
+            }
         }
     }
 
@@ -179,13 +182,17 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
                         match message {
                             Ok(status) => {
                                 if sender.send(Ok(status)).await.is_err() {
+                                    warn!("Failed to send status update to subscriber");
                                     break;
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(count)) => {
                                 debug!("Subscriber lagged by {count} messages");
                             }
-                            Err(broadcast::error::RecvError::Closed) => break,
+                            Err(broadcast::error::RecvError::Closed) => {
+                                warn!("Status broadcast channel closed");
+                                break;
+                            },
                         }
                     }
                     _ = async {
@@ -197,6 +204,7 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
                     } => {
                         let status = status_store.get_status().await;
                         if sender.send(Ok(status)).await.is_err() {
+                            warn!("Failed to send periodic status update to subscriber");
                             break;
                         }
                     }
@@ -231,6 +239,7 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
         let info = match self.device_info_access.read_device_info() {
             Ok(info) => info,
             Err(code) => {
+                error!("Failed to read device info: {code:?}");
                 return Ok(Response::new(GetDeviceInfoResponse {
                     code: code as i32,
                     device_info: None,
@@ -251,6 +260,7 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
         let variables = match self.process_image_access.get_layout() {
             Ok(layout) => layout,
             Err(code) => {
+                error!("Failed to get process data layout: {code:?}");
                 return Ok(Response::new(ProcessDataLayoutResponse {
                     code: code as i32,
                     variables: vec![],
@@ -270,6 +280,7 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
         self.validate_token(&request)?;
 
         if self.state_manager.get_state() != DeviceState::PreOp {
+            warn!("configure_streams called in invalid state");
             return Ok(Response::new(StatusResponse {
                 code: StatusCode::ErrNotReady as i32,
             }));
@@ -278,15 +289,20 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
         let request = request.into_inner();
         let layout = match self.process_image_access.get_layout() {
             Ok(layout) => layout,
-            Err(code) => return Ok(Response::new(StatusResponse { code: code as i32 })),
+            Err(code) => {
+                error!("Failed to get process image layout in configure_streams: {code:?}");
+                return Ok(Response::new(StatusResponse { code: code as i32 }));
+            }
         };
 
         if let Err(code) = validate_streams(&request.streams, &layout) {
+            warn!("Stream validation failed in configure_streams: {code:?}");
             return Ok(Response::new(StatusResponse { code: code as i32 }));
         }
 
         self.stream_store.reset();
         if let Err(code) = self.stream_store.add_stream_configs(request.streams) {
+            error!("Failed to add stream configs: {code:?}");
             return Ok(Response::new(StatusResponse { code: code as i32 }));
         }
 
@@ -310,6 +326,7 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
                 token
             }
             Err(status_code) => {
+                warn!("Failed to issue authentication token: {status_code:?}");
                 return Ok(Response::new(GetTokenResponse {
                     token: String::new(),
                     status: status_code as i32,

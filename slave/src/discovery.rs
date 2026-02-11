@@ -15,7 +15,7 @@ use common::discovery_types::{ETHERTYPE_SDCP, SDCP_HEADER_SIZE, SdcpHeader, Sdcp
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
 use common::slave_api::{DeviceInfo, DeviceState, IpSource, StatusCode};
 use common::state_machine::DeviceStateManager;
-use log::{info, warn};
+use log::{error, info, warn};
 use pnet::datalink::{self, Channel, DataLinkSender, NetworkInterface};
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
@@ -36,12 +36,19 @@ pub fn start_discovery_listener(
     device_state_manager: DeviceStateManager,
     device_info_access: Arc<dyn DeviceInfoAccess>,
     network_interface_access: Arc<dyn NetworkInterfaceAccess>,
-) {
+) -> Result<(), StatusCode> {
     let interfaces = datalink::interfaces();
-    let interface = interfaces
+
+    let interface = match interfaces
         .into_iter()
         .find(|interface| interface.name == interface_name)
-        .expect("Could not find network interface");
+    {
+        Some(interface) => interface,
+        None => {
+            error!("Could not find network interface: {interface_name}");
+            return Err(StatusCode::ErrSocketChannel);
+        }
+    };
 
     info!(
         "Starting Discovery Listener on interface: {}",
@@ -50,40 +57,62 @@ pub fn start_discovery_listener(
 
     let (mut transmitter, mut receiver) = match datalink::channel(&interface, Default::default()) {
         Ok(Channel::Ethernet(transmitter, receiver)) => (transmitter, receiver),
-        Ok(_) => panic!("Unhandled channel type"),
-        Err(e) => panic!("Failed to create datalink channel: {e}"),
+        Ok(_) => {
+            error!("Unhandled channel type for interface: {}", interface.name);
+            return Err(StatusCode::ErrSocketChannel);
+        }
+        Err(e) => {
+            error!("Failed to create datalink channel: {e}");
+            return Err(StatusCode::ErrSocketChannel);
+        }
     };
 
     thread::spawn(move || {
+        info!("SDCP discovery listener thread started");
         loop {
             if device_state_manager.get_state() != DeviceState::DiscoverySync {
+                info!("Discovery listener thread exiting due to state change");
                 break;
             }
 
             match receiver.next() {
                 Ok(packet) => {
-                    let ethernet_frame = EthernetPacket::new(packet).unwrap();
+                    let ethernet_frame = match EthernetPacket::new(packet) {
+                        Some(frame) => frame,
+                        None => {
+                            error!("Failed to parse Ethernet frame from received packet");
+                            continue;
+                        }
+                    };
                     if ethernet_frame.get_ethertype().0 != ETHERTYPE_SDCP {
                         continue;
                     }
 
                     let payload = ethernet_frame.payload();
-                    if let Ok(header) = SdcpHeader::read_from(payload) {
-                        handle_packet(
-                            &header,
-                            payload,
-                            &ethernet_frame,
-                            &mut *transmitter,
-                            &interface,
-                            &device_info_access,
-                            &network_interface_access,
-                        );
+                    match SdcpHeader::read_from(payload) {
+                        Ok(header) => {
+                            handle_packet(
+                                &header,
+                                payload,
+                                &ethernet_frame,
+                                &mut *transmitter,
+                                &interface,
+                                &device_info_access,
+                                &network_interface_access,
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse SDCP header: {e:?}");
+                        }
                     }
                 }
                 Err(e) => warn!("Failed to read packet: {e}"),
             }
         }
+        info!("SDCP discovery listener thread terminated");
     });
+
+    Ok(())
 }
 
 /// Handles incoming SDCP packets and generates appropriate responses.
@@ -189,9 +218,21 @@ fn handle_get_ip_request(
         ethernet_frame.get_source()
     );
 
-    let device_info = device_info_access
-        .read_device_info()
-        .unwrap_or(default_device_info());
+    let device_info = match device_info_access.read_device_info() {
+        Ok(info) => info,
+        Err(code) => {
+            warn!("Failed to read device info for GetIpReq: {code:?}");
+            send_status_response(
+                transmitter,
+                interface,
+                ethernet_frame,
+                SdcpOpCode::GetIpRes,
+                header.transaction_id,
+                code,
+            );
+            return;
+        }
+    };
 
     let ip: [u8; 4] = device_info
         .ip_address
@@ -231,74 +272,79 @@ fn handle_set_ip_request(
     device_info_access: &Arc<dyn DeviceInfoAccess>,
     network_interface_access: &Arc<dyn NetworkInterfaceAccess>,
 ) {
-    if raw_payload.len() > 5
-        && let Ok(tlv) = Tlv::read_from(&raw_payload[5..])
-        && let Some(ip_config) = tlv.parse_ip_config()
-    {
-        info!("Received IP Config: {ip_config:?}");
-
-        match network_interface_access.apply_ip_config(
-            ip_config.ip,
-            ip_config.netmask,
-            ip_config.gateway,
-        ) {
-            Ok(_) => {
-                info!("Successfully applied IP configuration to network interface");
-
-                let mut device_info = match device_info_access.read_device_info() {
-                    Ok(info) => info,
-                    Err(code) => {
-                        warn!("Failed to read device info: {code:?}");
-                        send_status_response(
-                            transmitter,
-                            interface,
-                            ethernet_frame,
-                            SdcpOpCode::SetIpRes,
-                            header.transaction_id,
-                            code,
-                        );
-                        return;
+    if raw_payload.len() > 5 {
+        match Tlv::read_from(&raw_payload[5..]) {
+            Ok(tlv) => match tlv.parse_ip_config() {
+                Some(ip_config) => {
+                    info!("Received IP Config: {ip_config:?}");
+                    match network_interface_access.apply_ip_config(
+                        ip_config.ip,
+                        ip_config.netmask,
+                        ip_config.gateway,
+                    ) {
+                        Ok(_) => {
+                            info!("Successfully applied IP configuration to network interface");
+                            let mut device_info = match device_info_access.read_device_info() {
+                                Ok(info) => info,
+                                Err(code) => {
+                                    warn!("Failed to read device info: {code:?}");
+                                    send_status_response(
+                                        transmitter,
+                                        interface,
+                                        ethernet_frame,
+                                        SdcpOpCode::SetIpRes,
+                                        header.transaction_id,
+                                        code,
+                                    );
+                                    return;
+                                }
+                            };
+                            device_info.ip_address = ip_config.ip.to_vec();
+                            device_info.netmask = ip_config.netmask.to_vec();
+                            device_info.gateway = ip_config.gateway.to_vec();
+                            match device_info_access.write_device_info(device_info) {
+                                Ok(info) => info,
+                                Err(code) => {
+                                    warn!("Failed to write device info: {code:?}");
+                                    send_status_response(
+                                        transmitter,
+                                        interface,
+                                        ethernet_frame,
+                                        SdcpOpCode::SetIpRes,
+                                        header.transaction_id,
+                                        code,
+                                    );
+                                    return;
+                                }
+                            };
+                            send_status_response(
+                                transmitter,
+                                interface,
+                                ethernet_frame,
+                                SdcpOpCode::SetIpRes,
+                                header.transaction_id,
+                                StatusCode::NoError,
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Failed to apply IP configuration: {e:?}");
+                            send_status_response(
+                                transmitter,
+                                interface,
+                                ethernet_frame,
+                                SdcpOpCode::SetIpRes,
+                                header.transaction_id,
+                                StatusCode::ErrHardwareAccess,
+                            );
+                        }
                     }
-                };
-                device_info.ip_address = ip_config.ip.to_vec();
-                device_info.netmask = ip_config.netmask.to_vec();
-                device_info.gateway = ip_config.gateway.to_vec();
-                match device_info_access.write_device_info(device_info) {
-                    Ok(info) => info,
-                    Err(code) => {
-                        warn!("Failed to read device info: {code:?}");
-                        send_status_response(
-                            transmitter,
-                            interface,
-                            ethernet_frame,
-                            SdcpOpCode::SetIpRes,
-                            header.transaction_id,
-                            code,
-                        );
-                        return;
-                    }
-                };
-
-                send_status_response(
-                    transmitter,
-                    interface,
-                    ethernet_frame,
-                    SdcpOpCode::SetIpRes,
-                    header.transaction_id,
-                    StatusCode::NoError,
-                );
-            }
+                }
+                None => {
+                    warn!("Failed to parse IP config from TLV");
+                }
+            },
             Err(e) => {
-                warn!("Failed to apply IP configuration: {e:?}");
-
-                send_status_response(
-                    transmitter,
-                    interface,
-                    ethernet_frame,
-                    SdcpOpCode::SetIpRes,
-                    header.transaction_id,
-                    StatusCode::ErrHardwareAccess,
-                );
+                warn!("Failed to read TLV from SetIpReq payload: {e:?}");
             }
         }
     }
@@ -357,7 +403,9 @@ fn send_response(
     eth.set_payload(&payload_buffer);
 
     let immutable = eth.to_immutable();
-    tx.send_to(immutable.packet(), None);
+    if let Some(Err(e)) = tx.send_to(immutable.packet(), None) {
+        error!("Failed to send SDCP response frame: {e:?}");
+    }
 }
 
 #[cfg(test)]

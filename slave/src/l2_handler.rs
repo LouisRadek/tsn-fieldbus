@@ -24,7 +24,7 @@ use common::l2_utils::{
 };
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::stream_store::StreamStore;
-use log::{debug, warn};
+use log::{error, info, warn};
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use pnet::util::MacAddr;
 use std::collections::HashMap;
@@ -52,12 +52,18 @@ pub fn start_l2_handler(
     stream_store: StreamStore,
     status_store: DeviceStatusStore,
     process_image: Arc<dyn ProcessImageAccess>,
-) -> L2HandlerHandle {
+) -> Result<L2HandlerHandle, StatusCode> {
     let interface = find_interface(interface_name);
     let (transmitter, receiver) = match datalink::channel(&interface, Default::default()) {
         Ok(Channel::Ethernet(transmitter, receiver)) => (transmitter, receiver),
-        Ok(_) => panic!("Unhandled channel type"),
-        Err(e) => panic!("Failed to create datalink channel: {e}"),
+        Ok(_) => {
+            error!("Unhandled channel type for interface: {}", interface.name);
+            return Err(StatusCode::ErrSocketChannel);
+        }
+        Err(e) => {
+            error!("Failed to create datalink channel: {e}");
+            return Err(StatusCode::ErrSocketChannel);
+        }
     };
 
     let input_streams = stream_store.get_streams_by_direction(Direction::Input);
@@ -77,10 +83,10 @@ pub fn start_l2_handler(
         process_image,
     );
 
-    L2HandlerHandle {
+    Ok(L2HandlerHandle {
         sender: sender_handle,
         receiver: receiver_handle,
-    }
+    })
 }
 
 #[cfg(feature = "test-utils")]
@@ -128,6 +134,7 @@ fn spawn_receiver_thread(
     }
 
     thread::spawn(move || {
+        info!("Slave L2 receiver thread started");
         let mut last_cycle_counter: HashMap<u16, u16> = HashMap::new();
 
         loop {
@@ -137,12 +144,16 @@ fn spawn_receiver_thread(
                 thread::sleep(Duration::from_micros(500));
                 continue;
             } else if state != DeviceState::Op {
+                info!("Slave L2 receiver thread exiting due to state: {state:?}");
                 break;
             }
 
             let frame = match receiver.next() {
                 Ok(frame) => frame,
-                Err(_) => continue,
+                Err(e) => {
+                    error!("Receiver error: {e}");
+                    continue;
+                }
             };
 
             let parsed = match parse_l2_frame(frame) {
@@ -195,6 +206,7 @@ fn spawn_receiver_thread(
                 runtime.block_on(status_store.update_status_code(code));
             }
         }
+        info!("Slave L2 receiver thread terminated");
     })
 }
 
@@ -215,6 +227,7 @@ fn spawn_sender_thread(
     let base_cycle = gcd_all(&cycle_times).max(1);
 
     thread::spawn(move || {
+        info!("Slave L2 sender thread started");
         let mut last_sent: HashMap<u16, Instant> = HashMap::new();
         let mut min_cycle = u32::MAX;
         let mut max_cycle = 0u32;
@@ -227,6 +240,7 @@ fn spawn_sender_thread(
                 let status = status_store.get_status().await;
                 let state = DeviceState::try_from(status.state).unwrap_or(DeviceState::Init);
                 if state != DeviceState::Op && state != DeviceState::SafeOp {
+                    info!("Slave L2 sender thread exiting due to state: {state:?}");
                     break;
                 }
 
@@ -256,7 +270,7 @@ fn spawn_sender_thread(
                     let payload = match build_frame_payload(process_image.as_ref(), stream) {
                         Ok(payload) => payload,
                         Err(code) => {
-                            warn!("Failed to package data for stream {stream_id}: {code:?}");
+                            error!("Failed to package data for stream {stream_id}: {code:?}");
                             status = code;
                             Vec::<u8>::new()
                         }
@@ -273,7 +287,7 @@ fn spawn_sender_thread(
                         &payload,
                     );
                     if let Some(Err(error)) = transmitter.send_to(&frame, None) {
-                        debug!("Failed to send L2 frame: {error}");
+                        error!("Failed to send L2 frame for stream {stream_id}: {error}");
                         status_store
                             .update_status_code(StatusCode::ErrSocketChannel)
                             .await;
@@ -281,5 +295,6 @@ fn spawn_sender_thread(
                 }
             }
         });
+        info!("Slave L2 sender thread terminated");
     })
 }

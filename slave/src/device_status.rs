@@ -8,6 +8,7 @@
 //! The store is intended for use by the slave runtime to publish status
 //! updates to connected masters via the gRPC `SubscribeToDeviceStatus` stream.
 //!
+use log::{error, info, warn};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -76,19 +77,33 @@ impl DeviceStatusStore {
         sensor: Arc<dyn TemperatureSensorAccess>,
     ) -> Result<(), StatusCode> {
         let temp_store = self.clone();
+
         tokio::spawn(async move {
+            info!("Temperature polling background task started");
             let mut interval =
                 time::interval(Duration::from_secs(TEMPERATURE_READ_INTERVAL_SEC as u64));
-            let mut last_published: i16 = sensor.read_temperature().unwrap_or_default();
+            let mut last_published: i16 = match sensor.read_temperature() {
+                Ok(temp) => temp,
+                Err(e) => {
+                    error!("Failed to read initial temperature: {e:?}");
+                    0
+                }
+            };
             loop {
                 interval.tick().await;
-                if let Ok(temperature) = sensor.read_temperature() {
-                    let has_to_be_published = (temperature - last_published).unsigned_abs() as u32
-                        >= TEMPERATURE_THRESHOLD as u32;
+                match sensor.read_temperature() {
+                    Ok(temperature) => {
+                        let has_to_be_published = (temperature - last_published).unsigned_abs()
+                            as u32
+                            >= TEMPERATURE_THRESHOLD as u32;
 
-                    if has_to_be_published {
-                        last_published = temperature;
-                        temp_store.update_temperature(temperature as i32).await;
+                        if has_to_be_published {
+                            last_published = temperature;
+                            temp_store.update_temperature(temperature as i32).await;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to read temperature: {e:?}");
                     }
                 }
             }
@@ -96,6 +111,7 @@ impl DeviceStatusStore {
 
         let log_store = self.clone();
         tokio::spawn(async move {
+            info!("Heartbeat logging background task started");
             let mut interval = time::interval(Duration::from_secs(LOG_INTERVAL_SEC as u64));
             loop {
                 interval.tick().await;
@@ -200,10 +216,13 @@ impl DeviceStatusStore {
     }
 
     fn append_log(&self, reason: LogReason, status: &DeviceStatus) {
-        let mut log = self
-            .log_entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut log = match self.log_entries.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("DeviceStatus log_entries mutex poisoned");
+                poisoned.into_inner()
+            }
+        };
         if log.len() == LOG_CAPACITY {
             log.pop_back();
         }
@@ -218,10 +237,13 @@ impl DeviceStatusStore {
     /// Returns `(total_entries, entries)` where `entries` is the requested
     /// window starting at `offset` with at most `limit` elements.
     pub fn get_log(&self, offset: usize, limit: usize) -> (u32, Vec<LogEntryDeviceStatus>) {
-        let log = self
-            .log_entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let log = match self.log_entries.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("DeviceStatus log_entries mutex poisoned in get_log");
+                poisoned.into_inner()
+            }
+        };
         let total = log.len();
         let entries = log
             .iter()
