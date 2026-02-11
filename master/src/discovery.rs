@@ -26,7 +26,7 @@ use common::discovery_types::{
 };
 use common::slave_api::{DeviceState, StatusCode};
 use common::state_machine::DeviceStateManager;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
@@ -84,9 +84,13 @@ impl DiscoveryMaster {
         let (transmitter, receiver) = match datalink::channel(&interface, Default::default()) {
             Ok(Channel::Ethernet(transmitter, receiver)) => (transmitter, receiver),
             Ok(_) => {
+                warn!("Unknown Channel");
                 return Err(StatusCode::ErrSocketChannel);
             }
-            Err(_e) => return Err(StatusCode::ErrSocketChannel),
+            Err(_e) => {
+                error!("Error initilizing a channel");
+                return Err(StatusCode::ErrSocketChannel);
+            }
         };
 
         Ok(Self {
@@ -158,7 +162,12 @@ impl DiscoveryMaster {
         &mut self,
         timeout: Option<Duration>,
     ) -> Result<Vec<DiscoveredDevice>, StatusCode> {
-        if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
+        let state = self.device_state_manager.get_state();
+        if state != DeviceState::DiscoverySync {
+            error!(
+                "State conflict, expected {:?}, got {state:?}",
+                DeviceState::DiscoverySync
+            );
             return Err(StatusCode::ErrStateConflict);
         }
 
@@ -233,7 +242,12 @@ impl DiscoveryMaster {
         target_mac: MacAddr,
         timeout: Option<Duration>,
     ) -> Result<IpReport, StatusCode> {
-        if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
+        let state = self.device_state_manager.get_state();
+        if state != DeviceState::DiscoverySync {
+            error!(
+                "State conflict, expected {:?}, got {state:?}",
+                DeviceState::DiscoverySync
+            );
             return Err(StatusCode::ErrStateConflict);
         }
 
@@ -255,6 +269,7 @@ impl DiscoveryMaster {
                         .and_then(|tlv| tlv.parse_ip_report())
                         .ok_or(StatusCode::ErrInvalidResponse)
                 } else {
+                    error!("No data in the payload");
                     Err(StatusCode::ErrInvalidResponse)
                 }
             })
@@ -290,7 +305,12 @@ impl DiscoveryMaster {
         gateway: [u8; 4],
         timeout: Option<Duration>,
     ) -> Result<(), StatusCode> {
-        if self.device_state_manager.get_state() != DeviceState::DiscoverySync {
+        let state = self.device_state_manager.get_state();
+        if state != DeviceState::DiscoverySync {
+            error!(
+                "State conflict, expected {:?}, got {state:?}",
+                DeviceState::DiscoverySync
+            );
             return Err(StatusCode::ErrStateConflict);
         }
 
@@ -334,6 +354,7 @@ impl DiscoveryMaster {
                         };
                     }
                 }
+                error!("No data in the response");
                 Err(StatusCode::ErrInvalidResponse)
             })
     }
@@ -366,13 +387,16 @@ impl DiscoveryMaster {
 
         let mut payload = Vec::with_capacity(SDCP_HEADER_SIZE as usize + tlv_size);
         let header = SdcpHeader::new(op_code, transaction_id);
-        header
-            .write_to(&mut payload)
-            .map_err(|_e| StatusCode::ErrOsFailure)?;
+        header.write_to(&mut payload).map_err(|e| {
+            error!("Could not write header into payload buffer: {e}");
+            StatusCode::ErrOsFailure
+        })?;
 
         if let Some(tlv) = payload_tlv {
-            tlv.write_to(&mut payload)
-                .map_err(|_e| StatusCode::ErrOsFailure)?;
+            tlv.write_to(&mut payload).map_err(|e| {
+                error!("Could not write tlv into payload buffer: {e}");
+                StatusCode::ErrOsFailure
+            })?;
         }
 
         eth_packet.set_payload(&payload);
@@ -382,8 +406,18 @@ impl DiscoveryMaster {
 
     fn send_frame(&mut self, frame: &[u8]) -> Result<(), StatusCode> {
         match self.transmitter.send_to(frame, None) {
-            Some(Ok(_)) => Ok(()),
-            Some(Err(_)) | None => Err(StatusCode::ErrSocketChannel),
+            Some(Ok(_)) => {
+                debug!("Frame sent successfully ({} bytes)", frame.len());
+                Ok(())
+            }
+            Some(Err(e)) => {
+                error!("Failed to send frame: {e:?}");
+                Err(StatusCode::ErrSocketChannel)
+            }
+            None => {
+                error!("Failed to send frame: transmitter returned None");
+                Err(StatusCode::ErrSocketChannel)
+            }
         }
     }
 
@@ -393,8 +427,14 @@ impl DiscoveryMaster {
     /// or `None` if no frame is available.
     fn receive_raw_frame_nonblocking(&mut self) -> Option<Vec<u8>> {
         match self.receiver.next() {
-            Ok(data) => Some(data.to_vec()),
-            Err(_) => None,
+            Ok(data) => {
+                debug!("Received raw frame ({} bytes)", data.len());
+                Some(data.to_vec())
+            }
+            Err(e) => {
+                debug!("No frame received: {e}");
+                None
+            }
         }
     }
 
@@ -412,10 +452,15 @@ impl DiscoveryMaster {
                 Ok(data) => {
                     if let Some(ethernet_frame) = EthernetPacket::new(data) {
                         if ethernet_frame.get_ethertype().0 != ETHERTYPE_SDCP {
+                            debug!("Frame ethertype mismatch, skipping");
                             continue;
                         }
 
                         if ethernet_frame.get_source() != expected_source {
+                            debug!(
+                                "Frame source MAC mismatch (expected: {expected_source}, got: {:?}), skipping",
+                                ethernet_frame.get_source()
+                            );
                             continue;
                         }
 
@@ -428,7 +473,11 @@ impl DiscoveryMaster {
                                 "Received expected response from {expected_source}: {expected_opcode:?}"
                             );
                             return Ok(payload.to_vec());
+                        } else {
+                            debug!("Frame header did not match expected opcode/transaction_id");
                         }
+                    } else {
+                        warn!("Failed to parse Ethernet frame");
                     }
                 }
                 Err(e) => {
@@ -437,6 +486,9 @@ impl DiscoveryMaster {
             }
         }
 
+        error!(
+            "Timeout waiting for response from {expected_source} (opcode: {expected_opcode:?}, transaction_id: {expected_transaction_id:#06x})"
+        );
         Err(StatusCode::ErrTimeout)
     }
 }
