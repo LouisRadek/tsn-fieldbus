@@ -237,7 +237,4 @@ service SlaveAPI {
   ///   - token: Valid token if operation successful. Otherwise is this field empty.
   ///   - status_code: Status information in case of an error.
   rpc GetToken(GetTokenRequest) returns (GetTokenResponse);
-
-  /// Reset the sequence number used for the generation of tags in the Hash-based Message Authentication Code (HMAC)
-  rpc ResetSequenceNumber(Empty) returns (StatusResponse);
 }

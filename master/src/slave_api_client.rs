@@ -222,30 +222,6 @@ impl SlaveApiClient {
         }
     }
 
-    pub async fn reset_sequence_number(&mut self) -> Result<StatusResponse, Status> {
-        let mut request = Request::new(slave_api::Empty {});
-        self.attach_token(&mut request).await?;
-        let response = self.client.reset_sequence_number(request).await;
-        match response {
-            Ok(response) => Ok(response.into_inner()),
-            Err(status) if status.code() == Code::Unauthenticated => {
-                warn!("Token invalid or expired during reset_sequence_number, refreshing token");
-                self.invalidate_token().await;
-                let mut request = Request::new(slave_api::Empty {});
-                self.attach_token(&mut request).await?;
-                Ok(self
-                    .client
-                    .reset_sequence_number(request)
-                    .await?
-                    .into_inner())
-            }
-            Err(status) => {
-                error!("reset_sequence_number failed: {status}");
-                Err(status)
-            }
-        }
-    }
-
     pub async fn configure_streams(
         &mut self,
         streams: Vec<StreamConfig>,

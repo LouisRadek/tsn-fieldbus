@@ -347,19 +347,6 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
             status: StatusCode::NoError as i32,
         }))
     }
-
-    async fn reset_sequence_number(
-        &self,
-        request: Request<slave_api::Empty>,
-    ) -> Result<Response<StatusResponse>, Status> {
-        self.validate_token(&request)?;
-
-        // TODO: Add reset of the sequence number of the discovery and L2 protocol security
-
-        Ok(Response::new(StatusResponse {
-            code: StatusCode::ErrNotSupported as i32,
-        }))
-    }
 }
 
 fn validate_streams(
