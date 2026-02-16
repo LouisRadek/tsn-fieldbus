@@ -1,3 +1,4 @@
+pub mod demo_runtime;
 pub mod discovery_types;
 pub mod hardware_abstraction;
 pub mod l2_types;

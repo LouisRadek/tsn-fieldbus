@@ -3,10 +3,16 @@
 //!
 //! This is a mock for the hardware implementation by a manufacturer.
 //! It implements a process image with simulated data and implements both
-//! the `ProcessImageAccess` and `DeviceInfoAccess` traits to provide access
-//! to process variables and device information respectively.
+//! the `ProcessImageAccess`, `DeviceInfoAccess`, `NetworkInterfaceAccess` and `TemperaturSensorAccess` traits.
+//!
+//! There are 3 different mocks combined:
+//! - Tests: Simple mock for tests and integration tests
+//! - Demo hardware Mock:
+//!     - Temperatur Sensor
+//!     - Valve Sensor
 
 use common::{
+    demo_runtime::configure_interface_ipv4,
     hardware_abstraction::{
         DeviceInfoAccess, NetworkInterfaceAccess, ProcessImageAccess, TemperatureSensorAccess,
     },
@@ -14,6 +20,13 @@ use common::{
     slave_api::{DataType, DeviceInfo, Direction, IpSource, Position, ProcessVariable, StatusCode},
 };
 use std::sync::{Arc, RwLock};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DummyHardwareRole {
+    Tests,
+    TemperatureSensor,
+    ValveController,
+}
 
 /// Mock thread-safe hardware implementation for testing.
 /// Simulates:
@@ -24,6 +37,8 @@ pub struct DummyHardware {
     input_image: Arc<RwLock<Vec<u8>>>,
     output_image: Arc<RwLock<Vec<u8>>>,
     device_info: Arc<RwLock<DeviceInfo>>,
+    role: DummyHardwareRole,
+    interface_name: Option<String>,
 }
 
 impl DummyHardware {
@@ -51,10 +66,53 @@ impl DummyHardware {
                 firmware_version: 1,
                 capabilities: 0,
             })),
+            role: DummyHardwareRole::Tests,
+            interface_name: None,
         }
     }
 
-    /// Simulate physical change (e.g., temperature fluctuation).
+    pub fn new_temperature_sensor(interface_name: String, mac_address: [u8; 6]) -> Self {
+        Self {
+            input_image: Arc::new(RwLock::new(vec![])),
+            output_image: Arc::new(RwLock::new(vec![0; 2])),
+            device_info: Arc::new(RwLock::new(DeviceInfo {
+                mac_address: mac_address.to_vec(),
+                ip_address: vec![0, 0, 0, 0],
+                ip_source: IpSource::Unspecified.into(),
+                netmask: vec![255, 255, 255, 0],
+                gateway: vec![0, 0, 0, 0],
+                vendor_id: 42,
+                device_id: 1,
+                serial_number: 0x1000_0001,
+                firmware_version: 1,
+                capabilities: 0,
+            })),
+            role: DummyHardwareRole::TemperatureSensor,
+            interface_name: Some(interface_name),
+        }
+    }
+
+    pub fn new_valve_controller(interface_name: String, mac_address: [u8; 6]) -> Self {
+        Self {
+            input_image: Arc::new(RwLock::new(vec![0; 1])),
+            output_image: Arc::new(RwLock::new(vec![])),
+            device_info: Arc::new(RwLock::new(DeviceInfo {
+                mac_address: mac_address.to_vec(),
+                ip_address: vec![0, 0, 0, 0],
+                ip_source: IpSource::Unspecified.into(),
+                netmask: vec![255, 255, 255, 0],
+                gateway: vec![0, 0, 0, 0],
+                vendor_id: 42,
+                device_id: 2,
+                serial_number: 0x1000_0002,
+                firmware_version: 1,
+                capabilities: 0,
+            })),
+            role: DummyHardwareRole::ValveController,
+            interface_name: Some(interface_name),
+        }
+    }
+
     pub fn simulate_sensor_change(&self, new_temp: i16) {
         if let Ok(mut lock) = self.output_image.write() {
             lock[0] = (new_temp >> 8) as u8;
@@ -62,8 +120,7 @@ impl DummyHardware {
         }
     }
 
-    /// Read actuator state for verification.
-    pub fn get_led_status(&self) -> bool {
+    pub fn get_valve_status(&self) -> bool {
         if let Ok(lock) = self.input_image.read() {
             (lock[0] & 0x01) != 0
         } else {
@@ -98,45 +155,54 @@ impl NetworkInterfaceAccess for DummyHardware {
         netmask: [u8; 4],
         gateway: [u8; 4],
     ) -> Result<(), StatusCode> {
-        eprintln!(
-            "Mock: Applying IP config - IP: {}.{}.{}.{}, Netmask: {}.{}.{}.{}, Gateway: {}.{}.{}.{}",
-            ip[0],
-            ip[1],
-            ip[2],
-            ip[3],
-            netmask[0],
-            netmask[1],
-            netmask[2],
-            netmask[3],
-            gateway[0],
-            gateway[1],
-            gateway[2],
-            gateway[3]
-        );
+        let _ = gateway;
+        if let Some(interface_name) = &self.interface_name {
+            configure_interface_ipv4(interface_name, ip, netmask)
+                .map_err(|_| StatusCode::ErrHardwareAccess)?;
+        }
+
         Ok(())
     }
 }
 
 impl ProcessImageAccess for DummyHardware {
     fn get_layout(&self) -> Result<Vec<ProcessVariable>, StatusCode> {
-        Ok(vec![
-            ProcessVariable {
-                name: "Status_LED".to_string(),
-                data_type: DataType::Bool as i32,
-                direction: Direction::Output as i32,
-                byte_offset: 2,
-                bit_offset: 0,
-                bit_len: 1,
-            },
-            ProcessVariable {
+        match self.role {
+            DummyHardwareRole::Tests => Ok(vec![
+                ProcessVariable {
+                    name: "Status_LED".to_string(),
+                    data_type: DataType::Bool as i32,
+                    direction: Direction::Output as i32,
+                    byte_offset: 2,
+                    bit_offset: 0,
+                    bit_len: 1,
+                },
+                ProcessVariable {
+                    name: "Temperature".to_string(),
+                    data_type: DataType::Int16 as i32,
+                    direction: Direction::Input as i32,
+                    byte_offset: 0,
+                    bit_offset: 0,
+                    bit_len: 16,
+                },
+            ]),
+            DummyHardwareRole::TemperatureSensor => Ok(vec![ProcessVariable {
                 name: "Temperature".to_string(),
-                data_type: DataType::Int16 as i32,
-                direction: Direction::Input as i32,
+                data_type: DataType::Uint16 as i32,
+                direction: Direction::Output as i32,
                 byte_offset: 0,
                 bit_offset: 0,
                 bit_len: 16,
-            },
-        ])
+            }]),
+            DummyHardwareRole::ValveController => Ok(vec![ProcessVariable {
+                name: "ValveOpen".to_string(),
+                data_type: DataType::Bool as i32,
+                direction: Direction::Input as i32,
+                byte_offset: 0,
+                bit_offset: 0,
+                bit_len: 1,
+            }]),
+        }
     }
 
     fn read_outputs(&self, position: Position) -> Result<Vec<u8>, StatusCode> {
@@ -278,7 +344,7 @@ mod tests {
         let outputs = hw.read_outputs(SENSOR_POSITION).unwrap();
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs, vec![0, 0]);
-        assert!(!hw.get_led_status());
+        assert!(!hw.get_valve_status());
     }
 
     #[test]
@@ -337,25 +403,25 @@ mod tests {
     fn test_write_outputs_single_byte() {
         let hw = DummyHardware::new();
         hw.write_inputs(&[0x01], LED_POSITION).unwrap();
-        assert!(hw.get_led_status());
+        assert!(hw.get_valve_status());
 
         hw.write_inputs(&[0x00], LED_POSITION).unwrap();
-        assert!(!hw.get_led_status());
+        assert!(!hw.get_valve_status());
     }
 
     #[test]
     fn test_write_outputs_multiple_bits() {
         let hw = DummyHardware::new();
         hw.write_inputs(&[0x01], LED_POSITION).unwrap();
-        assert!(hw.get_led_status());
+        assert!(hw.get_valve_status());
 
         // Bit 1 set, bit 0 clear
         hw.write_inputs(&[0x00], LED_POSITION).unwrap();
-        assert!(!hw.get_led_status());
+        assert!(!hw.get_valve_status());
 
         // All bits set except bit 0
         hw.write_inputs(&[0x00], LED_POSITION).unwrap();
-        assert!(!hw.get_led_status());
+        assert!(!hw.get_valve_status());
     }
 
     #[test]
@@ -363,7 +429,7 @@ mod tests {
         let hw = DummyHardware::new();
         let result = hw.write_inputs(&[0x01, 0xFF, 0xAA, 0xBB], LED_POSITION);
         assert_eq!(result, Err(StatusCode::ErrInvalidLen));
-        assert!(!hw.get_led_status());
+        assert!(!hw.get_valve_status());
     }
 
     #[test]
@@ -371,7 +437,7 @@ mod tests {
         let hw = DummyHardware::new();
         let result = hw.write_inputs(&[], LED_POSITION);
         assert_eq!(result, Err(StatusCode::ErrInvalidLen));
-        assert!(!hw.get_led_status());
+        assert!(!hw.get_valve_status());
     }
 
     #[test]
@@ -400,10 +466,10 @@ mod tests {
 
         hw.simulate_sensor_change(500);
         assert_sensor_bytes(&hw, 0x01, 0xF4);
-        assert!(!hw.get_led_status());
+        assert!(!hw.get_valve_status());
 
         hw.write_inputs(&[0x01], LED_POSITION).unwrap();
-        assert!(hw.get_led_status());
+        assert!(hw.get_valve_status());
         assert_sensor_bytes(&hw, 0x01, 0xF4);
     }
 
@@ -415,7 +481,7 @@ mod tests {
         let outputs = hw.read_outputs(SENSOR_POSITION).unwrap();
         let result = hw.write_inputs(&outputs, LED_POSITION);
         assert_eq!(result, Err(StatusCode::ErrInvalidLen));
-        assert!(!hw.get_led_status());
+        assert!(!hw.get_valve_status());
     }
 
     #[test]

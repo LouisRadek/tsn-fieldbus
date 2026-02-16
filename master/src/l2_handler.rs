@@ -15,6 +15,7 @@
 //!   derived from the configured cycle time. The tolerance is expressed in
 //!   ticks to account for jitter and counter wrap-around.
 
+use common::demo_runtime::vlan_priority_code_point;
 use common::hardware_abstraction::ProcessImageAccess;
 use common::l2_types::{L2Header, build_l2_frame, parse_l2_frame};
 use common::l2_utils::{
@@ -24,7 +25,7 @@ use common::l2_utils::{
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,11 +69,19 @@ pub fn start_l2_handler(
     let input_streams = stream_store.get_streams_by_direction(Direction::Input);
     let output_streams = stream_store.get_streams_by_direction(Direction::Output);
 
+    info!(
+        "Starting master L2 handler on interface={} input_streams={} output_streams={}",
+        interface_name,
+        input_streams.len(),
+        output_streams.len()
+    );
+
     let receiver_handle = spawn_receiver_thread(
         receiver,
         input_streams,
         device_state_manager.clone(),
         process_image.clone(),
+        format!("master-{interface_name}"),
     );
     let sender_handle = spawn_sender_thread(
         transmitter,
@@ -80,6 +89,7 @@ pub fn start_l2_handler(
         output_streams,
         device_state_manager,
         process_image,
+        format!("master-{interface_name}"),
     )?;
 
     Ok(L2HandlerHandle {
@@ -105,6 +115,7 @@ pub fn start_l2_handler_with_mocks(
         input_streams,
         device_state_manager.clone(),
         process_image.clone(),
+        "master-mock".to_string(),
     );
     let sender_handle = spawn_sender_thread(
         transmitter,
@@ -112,6 +123,7 @@ pub fn start_l2_handler_with_mocks(
         output_streams,
         device_state_manager,
         process_image,
+        "master-mock".to_string(),
     )?;
 
     Ok(L2HandlerHandle {
@@ -125,22 +137,26 @@ fn spawn_receiver_thread(
     streams: Vec<StreamConfig>,
     device_state_manager: DeviceStateManager,
     process_image: Arc<dyn ProcessImageAccess>,
+    thread_group: String,
 ) -> JoinHandle<()> {
     let mut stream_map = HashMap::new();
     for stream in streams {
         stream_map.insert(stream.stream_id as u16, stream);
     }
 
-    thread::spawn(move || {
-        info!("L2 receiver thread started");
+    thread::Builder::new()
+        .name(format!("{thread_group}-l2-receiving"))
+        .spawn(move || {
+        info!(
+            "L2 receiver thread started with {} input stream(s); active in SafeOp and Op",
+            stream_map.len()
+        );
+
         let mut last_cycle_counter: HashMap<u16, u16> = HashMap::new();
 
         loop {
             let state = device_state_manager.get_state();
-            if state == DeviceState::SafeOp {
-                thread::sleep(Duration::from_micros(500));
-                continue;
-            } else if state != DeviceState::Op {
+            if state != DeviceState::Op && state != DeviceState::SafeOp {
                 info!("L2 receiver thread exiting due to state: {state:?}");
                 break;
             }
@@ -155,8 +171,14 @@ fn spawn_receiver_thread(
 
             let parsed = match parse_l2_frame(frame) {
                 Ok(parsed) => parsed,
+                Err(StatusCode::ErrInvalidEthertype) => {
+                    continue;
+                }
                 Err(code) => {
-                    error!("Failed to parse L2 frame: {code:?}");
+                    warn!(
+                        "Failed to parse L2 frame: {code:?} (frame_len={} bytes)",
+                        frame.len()
+                    );
                     continue;
                 }
             };
@@ -166,6 +188,12 @@ fn spawn_receiver_thread(
                 error!("Received L2 frame for unknown stream {stream_id}");
                 continue;
             };
+
+            debug!(
+                "L2 input stream={stream_id} vlan_tci=0x{:04x} pcp={}",
+                parsed.vlan_id_pcp,
+                vlan_priority_code_point(parsed.vlan_id_pcp)
+            );
 
             if parsed.header.status != StatusCode::NoError as u8 {
                 error!(
@@ -202,6 +230,7 @@ fn spawn_receiver_thread(
         }
         info!("L2 receiver thread terminated");
     })
+    .expect("Failed to spawn master L2 receiver thread")
 }
 
 fn spawn_sender_thread(
@@ -210,6 +239,7 @@ fn spawn_sender_thread(
     streams: Vec<StreamConfig>,
     device_state_manager: DeviceStateManager,
     process_image: Arc<dyn ProcessImageAccess>,
+    thread_group: String,
 ) -> Result<JoinHandle<()>, StatusCode> {
     let runtime = Handle::current();
     let source_mac = match interface.mac {
@@ -223,8 +253,13 @@ fn spawn_sender_thread(
         .collect::<Vec<_>>();
     let base_cycle_ns = gcd_all(&cycle_times).max(1);
 
-    let handle = thread::spawn(move || {
-        info!("L2 sender thread started");
+    let handle = thread::Builder::new()
+        .name(format!("{thread_group}-l2-transmitting"))
+        .spawn(move || {
+        info!(
+            "L2 sender thread started with {} output stream(s); active in SafeOp and Op",
+            streams.len()
+        );
         let mut last_sent: HashMap<u16, Instant> = HashMap::new();
 
         runtime.block_on(async move {
@@ -278,6 +313,14 @@ fn spawn_sender_thread(
                         &header,
                         &payload,
                     );
+
+                    debug!(
+                        "L2 output stream={} vlan_tci=0x{:04x} pcp={}",
+                        stream.stream_id,
+                        stream.vlan_id_pcp as u16,
+                        vlan_priority_code_point(stream.vlan_id_pcp as u16)
+                    );
+
                     if let Some(Err(error)) = transmitter.send_to(&frame, None) {
                         error!("Failed to send L2 frame for stream {stream_id}: {error}");
                     }
@@ -285,7 +328,8 @@ fn spawn_sender_thread(
             }
         });
         info!("L2 sender thread terminated");
-    });
+    })
+    .map_err(|_| StatusCode::ErrSocketChannel)?;
 
     Ok(handle)
 }

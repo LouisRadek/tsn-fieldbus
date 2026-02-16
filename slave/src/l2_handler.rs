@@ -16,6 +16,7 @@
 //!   ticks to account for jitter and counter wrap-around.
 
 use crate::DeviceStatusStore;
+use common::demo_runtime::vlan_priority_code_point;
 use common::hardware_abstraction::ProcessImageAccess;
 use common::l2_types::{L2Header, build_l2_frame, parse_l2_frame};
 use common::l2_utils::{
@@ -24,7 +25,7 @@ use common::l2_utils::{
 };
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::stream_store::StreamStore;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use pnet::util::MacAddr;
 use std::collections::HashMap;
@@ -69,11 +70,19 @@ pub fn start_l2_handler(
     let input_streams = stream_store.get_streams_by_direction(Direction::Input);
     let output_streams = stream_store.get_streams_by_direction(Direction::Output);
 
+    info!(
+        "Starting slave L2 handler on interface={} input_streams={} output_streams={}",
+        interface_name,
+        input_streams.len(),
+        output_streams.len()
+    );
+
     let receiver_handle = spawn_receiver_thread(
         receiver,
         input_streams,
         status_store.clone(),
         process_image.clone(),
+        format!("slave-{interface_name}"),
     );
     let sender_handle = spawn_sender_thread(
         transmitter,
@@ -81,6 +90,7 @@ pub fn start_l2_handler(
         output_streams,
         status_store,
         process_image,
+        format!("slave-{interface_name}"),
     );
 
     Ok(L2HandlerHandle {
@@ -106,6 +116,7 @@ pub fn start_l2_handler_with_mocks(
         input_streams,
         status_store.clone(),
         process_image.clone(),
+        "slave-mock".to_string(),
     );
     let sender_handle = spawn_sender_thread(
         transmitter,
@@ -113,6 +124,7 @@ pub fn start_l2_handler_with_mocks(
         output_streams,
         status_store,
         process_image,
+        "slave-mock".to_string(),
     );
 
     L2HandlerHandle {
@@ -126,6 +138,7 @@ fn spawn_receiver_thread(
     streams: Vec<StreamConfig>,
     status_store: DeviceStatusStore,
     process_image: Arc<dyn ProcessImageAccess>,
+    thread_group: String,
 ) -> JoinHandle<()> {
     let runtime = Handle::current();
     let mut stream_map = HashMap::new();
@@ -133,8 +146,14 @@ fn spawn_receiver_thread(
         stream_map.insert(stream.stream_id as u16, stream);
     }
 
-    thread::spawn(move || {
-        info!("Slave L2 receiver thread started");
+    thread::Builder::new()
+        .name(format!("{thread_group}-l2-receiving"))
+        .spawn(move || {
+        info!(
+            "Slave L2 receiver thread started with {} input stream(s); active in Op",
+            stream_map.len()
+        );
+        
         let mut last_cycle_counter: HashMap<u16, u16> = HashMap::new();
 
         loop {
@@ -158,6 +177,9 @@ fn spawn_receiver_thread(
 
             let parsed = match parse_l2_frame(frame) {
                 Ok(parsed) => parsed,
+                Err(StatusCode::ErrInvalidEthertype) => {
+                    continue;
+                }
                 Err(code) => {
                     warn!("Failed to parse L2 frame: {code:?}");
                     runtime.block_on(status_store.update_status_code(StatusCode::ErrFrameParsing));
@@ -171,6 +193,12 @@ fn spawn_receiver_thread(
                 runtime.block_on(status_store.update_status_code(StatusCode::ErrStreamIdUnknown));
                 continue;
             };
+
+            debug!(
+                "L2 input stream={stream_id} vlan_tci=0x{:04x} pcp={}",
+                parsed.vlan_id_pcp,
+                vlan_priority_code_point(parsed.vlan_id_pcp)
+            );
 
             if parsed.header.status != StatusCode::NoError as u8 {
                 warn!(
@@ -208,6 +236,7 @@ fn spawn_receiver_thread(
         }
         info!("Slave L2 receiver thread terminated");
     })
+    .expect("Failed to spawn slave L2 receiver thread")
 }
 
 fn spawn_sender_thread(
@@ -216,6 +245,7 @@ fn spawn_sender_thread(
     streams: Vec<StreamConfig>,
     status_store: DeviceStatusStore,
     process_image: Arc<dyn ProcessImageAccess>,
+    thread_group: String,
 ) -> JoinHandle<()> {
     let runtime = tokio::runtime::Handle::current();
     let source_mac = interface.mac.unwrap_or(MacAddr::zero());
@@ -226,8 +256,13 @@ fn spawn_sender_thread(
         .collect::<Vec<_>>();
     let base_cycle = gcd_all(&cycle_times).max(1);
 
-    thread::spawn(move || {
-        info!("Slave L2 sender thread started");
+    thread::Builder::new()
+        .name(format!("{thread_group}-l2-transmitting"))
+        .spawn(move || {
+        info!(
+            "L2 sender thread started with {} output stream(s); active in SafeOp and Op",
+            streams.len()
+        );
         let mut last_sent: HashMap<u16, Instant> = HashMap::new();
         let mut min_cycle = u32::MAX;
         let mut max_cycle = 0u32;
@@ -286,6 +321,14 @@ fn spawn_sender_thread(
                         &header,
                         &payload,
                     );
+
+                    debug!(
+                        "L2 output stream={} vlan_tci=0x{:04x} pcp={}",
+                        stream.stream_id,
+                        stream.vlan_id_pcp as u16,
+                        vlan_priority_code_point(stream.vlan_id_pcp as u16)
+                    );
+
                     if let Some(Err(error)) = transmitter.send_to(&frame, None) {
                         error!("Failed to send L2 frame for stream {stream_id}: {error}");
                         status_store
@@ -297,4 +340,5 @@ fn spawn_sender_thread(
         });
         info!("Slave L2 sender thread terminated");
     })
+    .expect("Failed to spawn slave L2 sender thread")
 }

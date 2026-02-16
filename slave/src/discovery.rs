@@ -21,6 +21,7 @@ use pnet::packet::Packet;
 use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::{cmp, thread};
 
 /// Starts a discovery listener that responds to SDCP discovery requests.
@@ -36,7 +37,7 @@ pub fn start_discovery_listener(
     device_state_manager: DeviceStateManager,
     device_info_access: Arc<dyn DeviceInfoAccess>,
     network_interface_access: Arc<dyn NetworkInterfaceAccess>,
-) -> Result<(), StatusCode> {
+) -> Result<JoinHandle<()>, StatusCode> {
     let interfaces = datalink::interfaces();
 
     let interface = match interfaces
@@ -67,7 +68,7 @@ pub fn start_discovery_listener(
         }
     };
 
-    thread::spawn(move || {
+    let join_handle = thread::spawn(move || {
         info!("SDCP discovery listener thread started");
         loop {
             if device_state_manager.get_state() != DeviceState::DiscoverySync {
@@ -97,6 +98,7 @@ pub fn start_discovery_listener(
                                 &ethernet_frame,
                                 &mut *transmitter,
                                 &interface,
+                                device_state_manager.clone(),
                                 &device_info_access,
                                 &network_interface_access,
                             );
@@ -112,7 +114,7 @@ pub fn start_discovery_listener(
         info!("SDCP discovery listener thread terminated");
     });
 
-    Ok(())
+    Ok(join_handle)
 }
 
 /// Handles incoming SDCP packets and generates appropriate responses.
@@ -129,12 +131,14 @@ pub fn start_discovery_listener(
 /// * `interface` - Local network interface information
 /// * `device_info_access` - Access to device identification and configuration
 /// * `network_interface_access` - Access to network interface configuration
+#[allow(clippy::too_many_arguments)]
 pub fn handle_packet(
     header: &SdcpHeader,
     raw_payload: &[u8],
     ethernet_frame: &EthernetPacket,
     transmitter: &mut dyn datalink::DataLinkSender,
     interface: &NetworkInterface,
+    device_state_manager: DeviceStateManager,
     device_info_access: &Arc<dyn DeviceInfoAccess>,
     network_interface_access: &Arc<dyn NetworkInterfaceAccess>,
 ) {
@@ -155,6 +159,7 @@ pub fn handle_packet(
                 ethernet_frame,
                 transmitter,
                 interface,
+                device_state_manager,
                 device_info_access,
                 network_interface_access,
             );
@@ -263,12 +268,14 @@ fn handle_get_ip_request(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_set_ip_request(
     header: &SdcpHeader,
     raw_payload: &[u8],
     ethernet_frame: &EthernetPacket<'_>,
     transmitter: &mut dyn DataLinkSender,
     interface: &NetworkInterface,
+    device_state_manager: DeviceStateManager,
     device_info_access: &Arc<dyn DeviceInfoAccess>,
     network_interface_access: &Arc<dyn NetworkInterfaceAccess>,
 ) {
@@ -325,6 +332,10 @@ fn handle_set_ip_request(
                                 header.transaction_id,
                                 StatusCode::NoError,
                             );
+
+                            let _ = device_state_manager
+                                .set_target_state(DeviceState::PreOp)
+                                .map_err(|code| error!("Cannot enter PreOp state: {code:?}"));
                         }
                         Err(e) => {
                             warn!("Failed to apply IP configuration: {e:?}");
@@ -451,12 +462,16 @@ mod tests {
             let (payload, header) = build_sdcp_payload(op_code, transaction_id, tlv);
             let eth_frame = create_ethernet_frame(MASTER_MAC, BROADCAST_MAC);
 
+            let device_state_manager = DeviceStateManager::new();
+            let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
+
             handle_packet(
                 &header,
                 &payload,
                 &EthernetPacket::new(&eth_frame).unwrap(),
                 &mut self.sender,
                 &self.interface,
+                device_state_manager,
                 &self.device_info,
                 &self.network_access,
             );

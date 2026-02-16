@@ -179,9 +179,7 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
             loop {
                 let state = status_store.get_status().await.state;
                 if state == DeviceState::Error as i32 || state == DeviceState::Shutdown as i32 {
-                    warn!(
-                        "Subscribe publish task terminated, because device state is {state}"
-                    );
+                    warn!("Subscribe publish task terminated, because device state is {state}");
                     break;
                 }
 

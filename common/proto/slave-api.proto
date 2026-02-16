@@ -38,6 +38,7 @@ enum StatusCode {
   ERR_HARDWARE_ACCESS = 23;
   ERR_TIMEOUT = 24;
   ERR_INVALID_RESPONSE = 25;
+  ERR_INVALID_ETHERTYPE = 26;
 }
 
 enum SyncStatus {

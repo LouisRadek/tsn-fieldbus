@@ -203,12 +203,16 @@ fn try_process_sdcp_frame(
         return false;
     };
 
+    let device_state_manager = DeviceStateManager::new();
+    let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
+
     handle_packet(
         &header,
         payload,
         &eth_packet,
         tx,
         interface,
+        device_state_manager,
         device_info,
         network_interface,
     );
@@ -402,6 +406,9 @@ fn spawn_multi_slave_handler(
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(10));
 
+        let device_state_manager = DeviceStateManager::new();
+        let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
+
         for _ in 0..20 {
             let frame_data = rx_queue.lock().unwrap().pop_front();
 
@@ -418,6 +425,7 @@ fn spawn_multi_slave_handler(
                                 &eth_packet,
                                 &mut slave.tx,
                                 &slave.interface,
+                                device_state_manager.clone(),
                                 &slave.device_info,
                                 &slave.network_interface,
                             );
