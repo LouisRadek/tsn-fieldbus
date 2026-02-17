@@ -1,10 +1,9 @@
 mod logging;
 mod post_run;
-mod vlan_monitor;
 
 use common::demo_runtime::{
     DEMO_MASTER_INTERFACE, DEMO_TEMPERATURE_INTERFACE, DEMO_VALVE_INTERFACE, build_vlan_tag,
-    setup_demo_network, teardown_demo_network, try_set_realtime_priority, vlan_priority_code_point,
+    setup_demo_network, teardown_demo_network, try_set_realtime_priority,
 };
 use common::slave_api::{DeviceState, Direction, Position, StreamConfig, SubscribeStatusRequest};
 use common::state_machine::DeviceStateManager;
@@ -33,7 +32,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tokio::time;
-use vlan_monitor::spawn_vlan_packet_monitor;
 
 const LOG_DIRECTORY: &str = "logs";
 const SHARED_KEY_BYTES: [u8; 32] = [
@@ -53,8 +51,6 @@ const TEMPERATURE_STREAM_ID: u32 = 1001;
 const VALVE_STREAM_ID: u32 = 1002;
 const TEMPERATURE_STREAM_CYCLE_NS: u32 = 1_000_000;
 const VALVE_STREAM_CYCLE_NS: u32 = 1_000_000;
-const TEMPERATURE_VLAN_TAG: u16 = ((5u16) << 13) | 100;
-const VALVE_VLAN_TAG: u16 = ((3u16) << 13) | 100;
 
 #[derive(Clone, Copy)]
 enum DemoSlaveRole {
@@ -156,7 +152,7 @@ fn run_slave_thread(config: DemoSlaveConfig, shared_key: PreSharedKey) -> Result
         config.mac_address[4],
         config.mac_address[5]
     );
-    if let Err(error) = try_set_realtime_priority(70) {
+    if let Err(error) = try_set_realtime_priority(98) {
         warn!(
             "Unable to set real-time priority for {}: {error}",
             config.component
@@ -323,7 +319,7 @@ fn run_slave_thread(config: DemoSlaveConfig, shared_key: PreSharedKey) -> Result
 async fn run_master_thread() -> Result<(), String> {
     set_log_component(MASTER_LOG_COMPONENT);
     info!("Starting master runtime on interface {DEMO_MASTER_INTERFACE}");
-    if let Err(error) = try_set_realtime_priority(80) {
+    if let Err(error) = try_set_realtime_priority(99) {
         warn!("Unable to set real-time priority for master: {error}");
     }
 
@@ -682,14 +678,6 @@ async fn run_master_thread() -> Result<(), String> {
     status_task_temperature.abort();
     status_task_valve.abort();
 
-    info!(
-        "Configured VLAN Tag values: temperature=0x{:04x} (pcp={}), valve=0x{:04x} (pcp={})",
-        TEMPERATURE_VLAN_TAG,
-        vlan_priority_code_point(TEMPERATURE_VLAN_TAG),
-        VALVE_VLAN_TAG,
-        vlan_priority_code_point(VALVE_VLAN_TAG)
-    );
-
     Ok(())
 }
 
@@ -714,7 +702,6 @@ fn main() {
     }
 
     let stop_monitor = Arc::new(AtomicBool::new(false));
-    let monitor_handle = spawn_vlan_packet_monitor(stop_monitor.clone());
 
     let temperature_slave = DemoSlaveConfig {
         role: DemoSlaveRole::Temperature,
@@ -769,7 +756,6 @@ fn main() {
     }
 
     stop_monitor.store(true, Ordering::Relaxed);
-    let _ = monitor_handle.join();
 
     if let Err(error) = teardown_demo_network() {
         warn!("Demo network teardown reported an issue: {error}");

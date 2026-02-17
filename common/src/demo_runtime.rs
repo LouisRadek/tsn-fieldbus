@@ -24,12 +24,8 @@ pub fn build_vlan_tag(vlan_id: u16, priority_code_point: u8) -> u16 {
     ((pcp << 13) & 0xE000) | (vlan_id & 0x0FFF)
 }
 
-pub fn vlan_priority_code_point(vlan_tci: u16) -> u8 {
-    ((vlan_tci >> 13) & 0x07) as u8
-}
-
-pub fn vlan_identifier(vlan_tci: u16) -> u16 {
-    vlan_tci & 0x0FFF
+pub fn vlan_identifier(vlan_tag: u16) -> u16 {
+    vlan_tag & 0x0FFF
 }
 
 pub fn setup_demo_network() -> Result<(), String> {
@@ -176,9 +172,8 @@ mod tests {
 
     #[test]
     fn test_build_and_extract_vlan_fields() {
-        let tci = build_vlan_tag(100, 5);
-        assert_eq!(vlan_identifier(tci), 100);
-        assert_eq!(vlan_priority_code_point(tci), 5);
+        let tag = build_vlan_tag(100, 5);
+        assert_eq!(vlan_identifier(tag), 100);
     }
 
     #[test]

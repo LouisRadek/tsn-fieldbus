@@ -16,7 +16,6 @@
 //!   ticks to account for jitter and counter wrap-around.
 
 use crate::DeviceStatusStore;
-use common::demo_runtime::vlan_priority_code_point;
 use common::hardware_abstraction::ProcessImageAccess;
 use common::l2_types::{L2Header, build_l2_frame, parse_l2_frame};
 use common::l2_utils::{
@@ -202,9 +201,7 @@ fn spawn_receiver_thread(
             };
 
             debug!(
-                "L2 input stream={stream_id} vlan_tci=0x{:04x} pcp={}",
-                parsed.vlan_id_pcp,
-                vlan_priority_code_point(parsed.vlan_id_pcp)
+                "L2 input stream={stream_id}"
             );
 
             if parsed.header.status != StatusCode::NoError as u8 {
@@ -352,10 +349,8 @@ fn spawn_sender_thread(
                     );
 
                     debug!(
-                        "L2 output stream={} vlan_tci=0x{:04x} pcp={}",
-                        stream.stream_id,
-                        stream.vlan_id_pcp as u16,
-                        vlan_priority_code_point(stream.vlan_id_pcp as u16)
+                        "L2 output stream={}",
+                        stream.stream_id
                     );
 
                     if let Some(Err(error)) = transmitter.send_to(&frame, None) {
