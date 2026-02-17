@@ -444,12 +444,16 @@ async fn run_master_thread() -> Result<(), String> {
         loop {
             match temperature_status_stream.message().await {
                 Ok(Some(status)) => info!(
-                    "Temperature status update: state={} status_code={} missed_cycles={} min_cycle_time_ns={} max_cycle_time_ns={}",
+                    "Temperature status update: state={} status_code={} missed_cycles={} receive_cycle_min_ns={} receive_cycle_max_ns={} receive_cycle_avg_ns={} send_cycle_min_ns={} send_cycle_max_ns={} send_cycle_avg_ns={}",
                     status.state,
                     status.status_code,
                     status.missed_cycles,
-                    status.min_cycle_time,
-                    status.max_cycle_time
+                    status.receive_cycle_min_ns,
+                    status.receive_cycle_max_ns,
+                    status.receive_cycle_avg_ns,
+                    status.send_cycle_min_ns,
+                    status.send_cycle_max_ns,
+                    status.send_cycle_avg_ns
                 ),
                 Ok(None) => break,
                 Err(error) => {
@@ -464,12 +468,16 @@ async fn run_master_thread() -> Result<(), String> {
         loop {
             match valve_status_stream.message().await {
                 Ok(Some(status)) => info!(
-                    "Valve status update: state={} status_code={} missed_cycles={} min_cycle_time_ns={} max_cycle_time_ns={}",
+                    "Valve status update: state={} status_code={} missed_cycles={} receive_cycle_min_ns={} receive_cycle_max_ns={} receive_cycle_avg_ns={} send_cycle_min_ns={} send_cycle_max_ns={} send_cycle_avg_ns={}",
                     status.state,
                     status.status_code,
                     status.missed_cycles,
-                    status.min_cycle_time,
-                    status.max_cycle_time
+                    status.receive_cycle_min_ns,
+                    status.receive_cycle_max_ns,
+                    status.receive_cycle_avg_ns,
+                    status.send_cycle_min_ns,
+                    status.send_cycle_max_ns,
+                    status.send_cycle_avg_ns
                 ),
                 Ok(None) => break,
                 Err(error) => {

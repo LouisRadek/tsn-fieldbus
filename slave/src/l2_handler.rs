@@ -20,8 +20,7 @@ use common::demo_runtime::vlan_priority_code_point;
 use common::hardware_abstraction::ProcessImageAccess;
 use common::l2_types::{L2Header, build_l2_frame, parse_l2_frame};
 use common::l2_utils::{
-    build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet,
-    parse_destination_mac, ticks_per_cycle, tolerance_ticks,
+    CycleMetrics, build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet, parse_destination_mac, ticks_per_cycle, tolerance_ticks
 };
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::stream_store::StreamStore;
@@ -155,10 +154,18 @@ fn spawn_receiver_thread(
         );
         
         let mut last_cycle_counter: HashMap<u16, u16> = HashMap::new();
+        let mut last_receive_instant_by_stream: HashMap<u16, Instant> = HashMap::new();
+        let mut receive_metrics = CycleMetrics::default();
+        let mut previous_state: Option<DeviceState> = None;
 
         loop {
             let status = runtime.block_on(status_store.get_status());
             let state = DeviceState::try_from(status.state).unwrap_or(DeviceState::Init);
+            if previous_state != Some(state) {
+                last_cycle_counter.clear();
+                last_receive_instant_by_stream.clear();
+                previous_state = Some(state);
+            }
             if state == DeviceState::SafeOp {
                 thread::sleep(Duration::from_micros(500));
                 continue;
@@ -230,9 +237,32 @@ fn spawn_receiver_thread(
             }
             last_cycle_counter.insert(stream_id, parsed.header.cycle_counter);
 
+            let now = Instant::now();
+            if let Some(previous) = last_receive_instant_by_stream.insert(stream_id, now) {
+                receive_metrics.record(now.duration_since(previous).as_nanos() as u64);
+                if let Some((min_ns, max_ns, average_ns)) = receive_metrics.values() {
+                    runtime.block_on(status_store.update_receive_cycle_metrics(
+                        min_ns,
+                        max_ns,
+                        average_ns,
+                    ));
+                }
+            }
+
             if let Err(code) = handle_input_packet(process_image.as_ref(), stream, parsed.payload) {
                 runtime.block_on(status_store.update_status_code(code));
             }
+        }
+        if let Some((min_ns, max_ns, average_ns)) = receive_metrics.values() {
+            info!(
+                "L2 cycle metrics component=slave direction=receive min_ns={} max_ns={} avg_ns={} samples={}",
+                min_ns,
+                max_ns,
+                average_ns,
+                receive_metrics.samples
+            );
+        } else {
+            info!("L2 cycle metrics component=slave direction=receive unavailable=true");
         }
         info!("Slave L2 receiver thread terminated");
     })
@@ -264,8 +294,7 @@ fn spawn_sender_thread(
             streams.len()
         );
         let mut last_sent: HashMap<u16, Instant> = HashMap::new();
-        let mut min_cycle = u32::MAX;
-        let mut max_cycle = 0u32;
+        let mut send_metrics = CycleMetrics::default();
 
         runtime.block_on(async move {
             let mut interval = time::interval(Duration::from_nanos(base_cycle as u64));
@@ -293,12 +322,12 @@ fn spawn_sender_thread(
 
                     let now = Instant::now();
                     if let Some(previous) = last_sent.insert(stream_id, now) {
-                        let elapsed = now.duration_since(previous);
-                        let elapsed_ns = elapsed.as_nanos() as u32;
-                        min_cycle = min_cycle.min(elapsed_ns);
-                        max_cycle = max_cycle.max(elapsed_ns);
-                        status_store.update_min_cycle_time(min_cycle).await;
-                        status_store.update_max_cycle_time(max_cycle).await;
+                        send_metrics.record(now.duration_since(previous).as_nanos() as u64);
+                        if let Some((min_ns, max_ns, average_ns)) = send_metrics.values() {
+                            status_store
+                                .update_send_cycle_metrics(min_ns, max_ns, average_ns)
+                                .await;
+                        }
                     }
 
                     let mut status = StatusCode::NoError;
@@ -336,6 +365,18 @@ fn spawn_sender_thread(
                             .await;
                     }
                 }
+            }
+
+            if let Some((min_ns, max_ns, average_ns)) = send_metrics.values() {
+                info!(
+                    "L2 cycle metrics component=slave direction=send min_ns={} max_ns={} avg_ns={} samples={}",
+                    min_ns,
+                    max_ns,
+                    average_ns,
+                    send_metrics.samples
+                );
+            } else {
+                info!("L2 cycle metrics component=slave direction=send unavailable=true");
             }
         });
         info!("Slave L2 sender thread terminated");

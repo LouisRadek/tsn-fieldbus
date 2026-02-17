@@ -112,6 +112,34 @@ pub fn parse_destination_mac(stream: &StreamConfig) -> MacAddr {
     )
 }
 
+#[derive(Default)]
+pub struct CycleMetrics {
+    pub min_ns: Option<u64>,
+    pub max_ns: Option<u64>,
+    pub total_ns: u128,
+    pub samples: u64,
+}
+
+impl CycleMetrics {
+    pub fn record(&mut self, cycle_ns: u64) {
+        self.min_ns = Some(self.min_ns.map_or(cycle_ns, |value| value.min(cycle_ns)));
+        self.max_ns = Some(self.max_ns.map_or(cycle_ns, |value| value.max(cycle_ns)));
+        self.total_ns = self.total_ns.saturating_add(cycle_ns as u128);
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    pub fn average_ns(&self) -> Option<u64> {
+        if self.samples == 0 {
+            return None;
+        }
+        Some((self.total_ns / self.samples as u128) as u64)
+    }
+
+    pub fn values(&self) -> Option<(u64, u64, u64)> {
+        Some((self.min_ns?, self.max_ns?, self.average_ns()?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

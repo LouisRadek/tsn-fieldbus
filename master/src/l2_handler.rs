@@ -19,8 +19,7 @@ use common::demo_runtime::vlan_priority_code_point;
 use common::hardware_abstraction::ProcessImageAccess;
 use common::l2_types::{L2Header, build_l2_frame, parse_l2_frame};
 use common::l2_utils::{
-    build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet,
-    parse_destination_mac, ticks_per_cycle, tolerance_ticks,
+    CycleMetrics, build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet, parse_destination_mac, ticks_per_cycle, tolerance_ticks
 };
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::state_machine::DeviceStateManager;
@@ -153,9 +152,18 @@ fn spawn_receiver_thread(
         );
 
         let mut last_cycle_counter: HashMap<u16, u16> = HashMap::new();
+        let mut last_receive_instant_by_stream: HashMap<u16, Instant> = HashMap::new();
+        let mut receive_metrics = CycleMetrics::default();
+        let mut missed_cycles_total = 0u64;
+        let mut previous_state: Option<DeviceState> = None;
 
         loop {
             let state = device_state_manager.get_state();
+            if previous_state != Some(state) {
+                last_cycle_counter.clear();
+                last_receive_instant_by_stream.clear();
+                previous_state = Some(state);
+            }
             if state != DeviceState::Op && state != DeviceState::SafeOp {
                 info!("L2 receiver thread exiting due to state: {state:?}");
                 break;
@@ -217,6 +225,7 @@ fn spawn_receiver_thread(
                     } else {
                         1
                     };
+                    missed_cycles_total = missed_cycles_total.saturating_add(missed_cycles as u64);
                     warn!(
                         "Cycle counter mismatch for stream {stream_id}: missed_cycles={missed_cycles}"
                     );
@@ -224,10 +233,29 @@ fn spawn_receiver_thread(
             }
             last_cycle_counter.insert(stream_id, parsed.header.cycle_counter);
 
+            if state == DeviceState::Op {
+                let now = Instant::now();
+                if let Some(previous) = last_receive_instant_by_stream.insert(stream_id, now) {
+                    receive_metrics.record(now.duration_since(previous).as_nanos() as u64);
+                }
+            }
+
             if let Err(code) = handle_input_packet(process_image.as_ref(), stream, parsed.payload) {
                 error!("Failed to handle packet for stream {stream_id}: {code:?}");
             }
         }
+        if let Some((min_ns, max_ns, average_ns)) = receive_metrics.values() {
+            info!(
+                "L2 cycle metrics component=master direction=receive min_ns={} max_ns={} avg_ns={} samples={}",
+                min_ns,
+                max_ns,
+                average_ns,
+                receive_metrics.samples
+            );
+        } else {
+            info!("L2 cycle metrics component=master direction=receive unavailable=true");
+        }
+        info!("L2 missed cycles component=master total={missed_cycles_total}");
         info!("L2 receiver thread terminated");
     })
     .expect("Failed to spawn master L2 receiver thread")
@@ -261,6 +289,7 @@ fn spawn_sender_thread(
             streams.len()
         );
         let mut last_sent: HashMap<u16, Instant> = HashMap::new();
+        let mut send_metrics = CycleMetrics::default();
 
         runtime.block_on(async move {
             let mut interval = time::interval(Duration::from_nanos(base_cycle_ns as u64));
@@ -291,7 +320,10 @@ fn spawn_sender_thread(
                         continue;
                     }
 
-                    last_sent.insert(stream_id, Instant::now());
+                    let now = Instant::now();
+                    if let Some(previous) = last_sent.insert(stream_id, now) {
+                        send_metrics.record(now.duration_since(previous).as_nanos() as u64);
+                    }
 
                     let mut status = StatusCode::NoError;
                     let payload = match build_frame_payload(process_image.as_ref(), stream) {
@@ -325,6 +357,18 @@ fn spawn_sender_thread(
                         error!("Failed to send L2 frame for stream {stream_id}: {error}");
                     }
                 }
+            }
+
+            if let Some((min_ns, max_ns, average_ns)) = send_metrics.values() {
+                info!(
+                    "L2 cycle metrics component=master direction=send min_ns={} max_ns={} avg_ns={} samples={}",
+                    min_ns,
+                    max_ns,
+                    average_ns,
+                    send_metrics.samples
+                );
+            } else {
+                info!("L2 cycle metrics component=master direction=send unavailable=true");
             }
         });
         info!("L2 sender thread terminated");
