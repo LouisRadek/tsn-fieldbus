@@ -119,9 +119,6 @@ async fn test_slave_api_endpoints() {
     let log_response = client.get_device_status_log(0, 10).await.expect("get log");
     assert!(log_response.total_entries >= 1);
 
-    let reset_response = client.reset_sequence_number().await.expect("reset seq");
-    assert_eq!(reset_response.code, StatusCode::ErrNotSupported as i32);
-
     handle.abort();
 }
 

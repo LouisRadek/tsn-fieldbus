@@ -60,6 +60,12 @@ impl DeviceStatusStore {
                 max_cycle_time: 0,
                 temperature: 0,
                 timestamp: generate_timestamp(),
+                receive_cycle_min_ns: 0,
+                receive_cycle_max_ns: 0,
+                receive_cycle_avg_ns: 0,
+                send_cycle_min_ns: 0,
+                send_cycle_max_ns: 0,
+                send_cycle_avg_ns: 0,
             })),
             broadcaster,
             log_entries: Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAPACITY))),
@@ -219,6 +225,24 @@ impl DeviceStatusStore {
             current.max_cycle_time = new_value;
             current.timestamp = generate_timestamp();
         }
+    }
+
+    pub async fn update_receive_cycle_metrics(&self, min_ns: u64, max_ns: u64, average_ns: u64) {
+        let mut current = self.current.write().await;
+
+        current.receive_cycle_min_ns = min_ns;
+        current.receive_cycle_max_ns = max_ns;
+        current.receive_cycle_avg_ns = average_ns;
+        current.timestamp = generate_timestamp();
+    }
+
+    pub async fn update_send_cycle_metrics(&self, min_ns: u64, max_ns: u64, average_ns: u64) {
+        let mut current = self.current.write().await;
+
+        current.send_cycle_min_ns = min_ns;
+        current.send_cycle_max_ns = max_ns;
+        current.send_cycle_avg_ns = average_ns;
+        current.timestamp = generate_timestamp();
     }
 
     pub async fn update_temperature(&self, new_value: i32) {

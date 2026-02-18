@@ -18,13 +18,13 @@
 use common::hardware_abstraction::ProcessImageAccess;
 use common::l2_types::{L2Header, build_l2_frame, parse_l2_frame};
 use common::l2_utils::{
-    build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet,
-    parse_destination_mac, ticks_per_cycle, tolerance_ticks,
+    CycleMetrics, absolute_cycle_jitter_ns, build_frame_payload, cycle_counter, find_interface,
+    gcd_all, handle_input_packet, parse_destination_mac, ticks_per_cycle, tolerance_ticks,
 };
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,11 +68,19 @@ pub fn start_l2_handler(
     let input_streams = stream_store.get_streams_by_direction(Direction::Input);
     let output_streams = stream_store.get_streams_by_direction(Direction::Output);
 
+    info!(
+        "Starting master L2 handler on interface={} input_streams={} output_streams={}",
+        interface_name,
+        input_streams.len(),
+        output_streams.len()
+    );
+
     let receiver_handle = spawn_receiver_thread(
         receiver,
         input_streams,
         device_state_manager.clone(),
         process_image.clone(),
+        format!("master-{interface_name}"),
     );
     let sender_handle = spawn_sender_thread(
         transmitter,
@@ -80,6 +88,7 @@ pub fn start_l2_handler(
         output_streams,
         device_state_manager,
         process_image,
+        format!("master-{interface_name}"),
     )?;
 
     Ok(L2HandlerHandle {
@@ -105,6 +114,7 @@ pub fn start_l2_handler_with_mocks(
         input_streams,
         device_state_manager.clone(),
         process_image.clone(),
+        "master-mock".to_string(),
     );
     let sender_handle = spawn_sender_thread(
         transmitter,
@@ -112,6 +122,7 @@ pub fn start_l2_handler_with_mocks(
         output_streams,
         device_state_manager,
         process_image,
+        "master-mock".to_string(),
     )?;
 
     Ok(L2HandlerHandle {
@@ -125,22 +136,36 @@ fn spawn_receiver_thread(
     streams: Vec<StreamConfig>,
     device_state_manager: DeviceStateManager,
     process_image: Arc<dyn ProcessImageAccess>,
+    thread_group: String,
 ) -> JoinHandle<()> {
     let mut stream_map = HashMap::new();
     for stream in streams {
         stream_map.insert(stream.stream_id as u16, stream);
     }
 
-    thread::spawn(move || {
-        info!("L2 receiver thread started");
+    thread::Builder::new()
+        .name(format!("{thread_group}-l2-receiving"))
+        .spawn(move || {
+        info!(
+            "L2 receiver thread started with {} input stream(s); active in SafeOp and Op",
+            stream_map.len()
+        );
+
         let mut last_cycle_counter: HashMap<u16, u16> = HashMap::new();
+        let mut last_receive_instant_by_stream: HashMap<u16, Instant> = HashMap::new();
+        let mut receive_metrics = CycleMetrics::default();
+        let mut receive_jitter_metrics = CycleMetrics::default();
+        let mut missed_cycles_total = 0u64;
+        let mut previous_state: Option<DeviceState> = None;
 
         loop {
             let state = device_state_manager.get_state();
-            if state == DeviceState::SafeOp {
-                thread::sleep(Duration::from_micros(500));
-                continue;
-            } else if state != DeviceState::Op {
+            if previous_state != Some(state) {
+                last_cycle_counter.clear();
+                last_receive_instant_by_stream.clear();
+                previous_state = Some(state);
+            }
+            if state != DeviceState::Op && state != DeviceState::SafeOp {
                 info!("L2 receiver thread exiting due to state: {state:?}");
                 break;
             }
@@ -155,8 +180,14 @@ fn spawn_receiver_thread(
 
             let parsed = match parse_l2_frame(frame) {
                 Ok(parsed) => parsed,
+                Err(StatusCode::ErrInvalidEthertype) => {
+                    continue;
+                }
                 Err(code) => {
-                    error!("Failed to parse L2 frame: {code:?}");
+                    warn!(
+                        "Failed to parse L2 frame: {code:?} (frame_len={} bytes)",
+                        frame.len()
+                    );
                     continue;
                 }
             };
@@ -166,6 +197,10 @@ fn spawn_receiver_thread(
                 error!("Received L2 frame for unknown stream {stream_id}");
                 continue;
             };
+
+            debug!(
+                "L2 input stream={stream_id}"
+            );
 
             if parsed.header.status != StatusCode::NoError as u8 {
                 error!(
@@ -189,6 +224,7 @@ fn spawn_receiver_thread(
                     } else {
                         1
                     };
+                    missed_cycles_total = missed_cycles_total.saturating_add(missed_cycles as u64);
                     warn!(
                         "Cycle counter mismatch for stream {stream_id}: missed_cycles={missed_cycles}"
                     );
@@ -196,12 +232,48 @@ fn spawn_receiver_thread(
             }
             last_cycle_counter.insert(stream_id, parsed.header.cycle_counter);
 
+            if state == DeviceState::Op {
+                let now = Instant::now();
+                if let Some(previous) = last_receive_instant_by_stream.insert(stream_id, now) {
+                    let observed_cycle_ns = now.duration_since(previous).as_nanos() as u64;
+                    receive_metrics.record(observed_cycle_ns);
+                    receive_jitter_metrics.record(absolute_cycle_jitter_ns(
+                        observed_cycle_ns,
+                        stream.cycle_time_nano as u64,
+                    ));
+                }
+            }
+
             if let Err(code) = handle_input_packet(process_image.as_ref(), stream, parsed.payload) {
                 error!("Failed to handle packet for stream {stream_id}: {code:?}");
             }
         }
+        if let Some((min_ns, max_ns, average_ns)) = receive_metrics.values() {
+            info!(
+                "L2 cycle metrics component=master direction=receive min_ns={} max_ns={} avg_ns={} samples={}",
+                min_ns,
+                max_ns,
+                average_ns,
+                receive_metrics.samples
+            );
+        } else {
+            info!("L2 cycle metrics component=master direction=receive unavailable=true");
+        }
+        if let Some((min_ns, max_ns, average_ns)) = receive_jitter_metrics.values() {
+            info!(
+                "L2 jitter metrics component=master direction=receive min_ns={} max_ns={} avg_ns={} samples={}",
+                min_ns,
+                max_ns,
+                average_ns,
+                receive_jitter_metrics.samples
+            );
+        } else {
+            info!("L2 jitter metrics component=master direction=receive unavailable=true");
+        }
+        info!("L2 missed cycles component=master total={missed_cycles_total}");
         info!("L2 receiver thread terminated");
     })
+    .expect("Failed to spawn master L2 receiver thread")
 }
 
 fn spawn_sender_thread(
@@ -210,6 +282,7 @@ fn spawn_sender_thread(
     streams: Vec<StreamConfig>,
     device_state_manager: DeviceStateManager,
     process_image: Arc<dyn ProcessImageAccess>,
+    thread_group: String,
 ) -> Result<JoinHandle<()>, StatusCode> {
     let runtime = Handle::current();
     let source_mac = match interface.mac {
@@ -223,14 +296,26 @@ fn spawn_sender_thread(
         .collect::<Vec<_>>();
     let base_cycle_ns = gcd_all(&cycle_times).max(1);
 
-    let handle = thread::spawn(move || {
-        info!("L2 sender thread started");
+    let handle = thread::Builder::new()
+        .name(format!("{thread_group}-l2-transmitting"))
+        .spawn(move || {
+        info!(
+            "L2 sender thread started with {} output stream(s); active in SafeOp and Op",
+            streams.len()
+        );
         let mut last_sent: HashMap<u16, Instant> = HashMap::new();
+        let mut send_metrics = CycleMetrics::default();
+        let mut send_jitter_metrics = CycleMetrics::default();
+        let mut previous_state: Option<DeviceState> = None;
 
         runtime.block_on(async move {
             let mut interval = time::interval(Duration::from_nanos(base_cycle_ns as u64));
             loop {
                 let state = device_state_manager.get_state();
+                if previous_state != Some(state) {
+                    last_sent.clear();
+                    previous_state = Some(state);
+                }
                 if state != DeviceState::Op && state != DeviceState::SafeOp {
                     info!("L2 sender thread exiting due to state: {state:?}");
                     break;
@@ -256,7 +341,19 @@ fn spawn_sender_thread(
                         continue;
                     }
 
-                    last_sent.insert(stream_id, Instant::now());
+                    let now = Instant::now();
+                    if state == DeviceState::Op {
+                        if let Some(previous) = last_sent.insert(stream_id, now) {
+                            let observed_cycle_ns = now.duration_since(previous).as_nanos() as u64;
+                            send_metrics.record(observed_cycle_ns);
+                            send_jitter_metrics.record(absolute_cycle_jitter_ns(
+                                observed_cycle_ns,
+                                cycle_time as u64,
+                            ));
+                        }
+                    } else {
+                        last_sent.insert(stream_id, now);
+                    }
 
                     let mut status = StatusCode::NoError;
                     let payload = match build_frame_payload(process_image.as_ref(), stream) {
@@ -278,14 +375,44 @@ fn spawn_sender_thread(
                         &header,
                         &payload,
                     );
+
+                    debug!(
+                        "L2 output stream={}",
+                        stream.stream_id
+                    );
+
                     if let Some(Err(error)) = transmitter.send_to(&frame, None) {
                         error!("Failed to send L2 frame for stream {stream_id}: {error}");
                     }
                 }
             }
+
+            if let Some((min_ns, max_ns, average_ns)) = send_metrics.values() {
+                info!(
+                    "L2 cycle metrics component=master direction=send min_ns={} max_ns={} avg_ns={} samples={}",
+                    min_ns,
+                    max_ns,
+                    average_ns,
+                    send_metrics.samples
+                );
+            } else {
+                info!("L2 cycle metrics component=master direction=send unavailable=true");
+            }
+            if let Some((min_ns, max_ns, average_ns)) = send_jitter_metrics.values() {
+                info!(
+                    "L2 jitter metrics component=master direction=send min_ns={} max_ns={} avg_ns={} samples={}",
+                    min_ns,
+                    max_ns,
+                    average_ns,
+                    send_jitter_metrics.samples
+                );
+            } else {
+                info!("L2 jitter metrics component=master direction=send unavailable=true");
+            }
         });
         info!("L2 sender thread terminated");
-    });
+    })
+    .map_err(|_| StatusCode::ErrSocketChannel)?;
 
     Ok(handle)
 }

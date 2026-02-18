@@ -153,26 +153,34 @@ pub fn build_l2_frame(
 }
 
 pub fn parse_l2_frame(frame: &[u8]) -> Result<ParsedL2Frame<'_>, StatusCode> {
-    if frame.len() < 18 + L2_HEADER_SIZE {
+    if frame.len() < 14 + L2_HEADER_SIZE {
         return Err(StatusCode::ErrInvalidLen);
     }
 
     let destination = MacAddr::new(frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]);
     let source = MacAddr::new(frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]);
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-    if ethertype != VLAN_ETHERTYPE {
-        return Err(StatusCode::ErrInvalidLen);
-    }
+    let (vlan_id_pcp, l2_header_offset) = if ethertype == VLAN_ETHERTYPE {
+        if frame.len() < 18 + L2_HEADER_SIZE {
+            return Err(StatusCode::ErrInvalidLen);
+        }
 
-    let vlan_id_pcp = u16::from_be_bytes([frame[14], frame[15]]);
-    let inner_ethertype = u16::from_be_bytes([frame[16], frame[17]]);
-    if inner_ethertype != crate::l2_types::ETHERTYPE_L2_PROTOCOL {
-        return Err(StatusCode::ErrInvalidLen);
-    }
+        let vlan_id_pcp = u16::from_be_bytes([frame[14], frame[15]]);
+        let inner_ethertype = u16::from_be_bytes([frame[16], frame[17]]);
+        if inner_ethertype != crate::l2_types::ETHERTYPE_L2_PROTOCOL {
+            return Err(StatusCode::ErrInvalidEthertype);
+        }
 
-    let header = L2Header::read_from(&frame[18..18 + L2_HEADER_SIZE])
-        .map_err(|_| StatusCode::ErrInvalidLen)?;
-    let payload = &frame[18 + L2_HEADER_SIZE..];
+        (vlan_id_pcp, 18usize)
+    } else if ethertype == crate::l2_types::ETHERTYPE_L2_PROTOCOL {
+        (0u16, 14usize)
+    } else {
+        return Err(StatusCode::ErrInvalidEthertype);
+    };
+
+    let header = L2Header::read_from(&frame[l2_header_offset..l2_header_offset + L2_HEADER_SIZE])
+        .map_err(|_| StatusCode::ErrFrameParsing)?;
+    let payload = &frame[l2_header_offset + L2_HEADER_SIZE..];
 
     Ok(ParsedL2Frame {
         destination,
@@ -235,7 +243,7 @@ mod tests {
         frame[13] = 0x34;
         assert!(matches!(
             parse_l2_frame(&frame),
-            Err(StatusCode::ErrInvalidLen)
+            Err(StatusCode::ErrInvalidEthertype)
         ));
     }
 
@@ -248,7 +256,7 @@ mod tests {
         frame[17] = 0x34;
         assert!(matches!(
             parse_l2_frame(&frame),
-            Err(StatusCode::ErrInvalidLen)
+            Err(StatusCode::ErrInvalidEthertype)
         ));
     }
 
@@ -265,6 +273,28 @@ mod tests {
         assert_eq!(parsed.destination, destination);
         assert_eq!(parsed.source, source);
         assert_eq!(parsed.vlan_id_pcp, vlan_id_pcp);
+        assert_eq!(parsed.header, header);
+        assert_eq!(parsed.payload, payload.as_slice());
+    }
+
+    #[test]
+    fn test_parse_l2_frame_accepts_untagged_l2_ethertype() {
+        let header = L2Header::new(0x1001, 0x2002, StatusCode::NoError as u8);
+        let payload = vec![0xAA, 0xBB];
+        let source = MacAddr::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
+        let destination = MacAddr::new(0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB);
+
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&destination.octets());
+        frame.extend_from_slice(&source.octets());
+        frame.write_u16::<BigEndian>(ETHERTYPE_L2_PROTOCOL).unwrap();
+        header.write_to(&mut frame).unwrap();
+        frame.extend_from_slice(&payload);
+
+        let parsed = parse_l2_frame(&frame).expect("untagged frame should parse");
+        assert_eq!(parsed.destination, destination);
+        assert_eq!(parsed.source, source);
+        assert_eq!(parsed.vlan_id_pcp, 0);
         assert_eq!(parsed.header, header);
         assert_eq!(parsed.payload, payload.as_slice());
     }

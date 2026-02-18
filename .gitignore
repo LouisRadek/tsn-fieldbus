@@ -1,3 +1,5 @@
 /target
 
 .env
+*.log
+post_run_summary.txt

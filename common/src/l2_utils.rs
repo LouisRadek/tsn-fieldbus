@@ -1,5 +1,6 @@
 use crate::hardware_abstraction::ProcessImageAccess;
 use crate::slave_api::{StatusCode, StreamConfig};
+use log::debug;
 use pnet::datalink::{self, NetworkInterface};
 use pnet::util::MacAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,11 +27,18 @@ pub fn handle_input_packet(
         .ok_or(StatusCode::ErrParamInvalid)?;
     let expected_len = bit_len_to_byte_len(content.bit_len);
 
-    if payload.len() != expected_len {
+    if payload.len() < expected_len {
         return Err(StatusCode::ErrInvalidLen);
     }
 
-    process_image.write_inputs(payload, *content)?;
+    debug!(
+        "Received input packet for stream_id {}: {} bytes, content: {:02X?}",
+        stream.stream_id,
+        payload.len(),
+        &payload[..expected_len]
+    );
+
+    process_image.write_inputs(&payload[..expected_len], *content)?;
 
     Ok(())
 }
@@ -104,9 +112,82 @@ pub fn parse_destination_mac(stream: &StreamConfig) -> MacAddr {
     )
 }
 
+pub fn absolute_cycle_jitter_ns(observed_cycle_ns: u64, target_cycle_ns: u64) -> u64 {
+    observed_cycle_ns.abs_diff(target_cycle_ns)
+}
+
+#[derive(Default)]
+pub struct CycleMetrics {
+    pub min_ns: Option<u64>,
+    pub max_ns: Option<u64>,
+    pub total_ns: u128,
+    pub samples: u64,
+}
+
+impl CycleMetrics {
+    pub fn record(&mut self, cycle_ns: u64) {
+        self.min_ns = Some(self.min_ns.map_or(cycle_ns, |value| value.min(cycle_ns)));
+        self.max_ns = Some(self.max_ns.map_or(cycle_ns, |value| value.max(cycle_ns)));
+        self.total_ns = self.total_ns.saturating_add(cycle_ns as u128);
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    pub fn average_ns(&self) -> Option<u64> {
+        if self.samples == 0 {
+            return None;
+        }
+        Some((self.total_ns / self.samples as u128) as u64)
+    }
+
+    pub fn values(&self) -> Option<(u64, u64, u64)> {
+        Some((self.min_ns?, self.max_ns?, self.average_ns()?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hardware_abstraction::ProcessImageAccess;
+    use crate::slave_api::{Direction, Position, ProcessVariable};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestProcessImage {
+        written_payloads: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl ProcessImageAccess for TestProcessImage {
+        fn get_layout(&self) -> Result<Vec<ProcessVariable>, StatusCode> {
+            Ok(Vec::new())
+        }
+
+        fn read_outputs(&self, _position: Position) -> Result<Vec<u8>, StatusCode> {
+            Ok(Vec::new())
+        }
+
+        fn write_inputs(&self, data: &[u8], _position: Position) -> Result<(), StatusCode> {
+            self.written_payloads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(data.to_vec());
+            Ok(())
+        }
+    }
+
+    fn build_stream(bit_len: u32) -> StreamConfig {
+        StreamConfig {
+            stream_id: 1001,
+            destination_mac: vec![0, 1, 2, 3, 4, 5],
+            vlan_id_pcp: 0x100,
+            cycle_time_nano: 1_000_000,
+            direction: Direction::Input as i32,
+            stream_content: Some(Position {
+                byte_offset: 0,
+                bit_offset: 0,
+                bit_len,
+            }),
+        }
+    }
 
     #[test]
     fn bit_len_to_byte_len_rounds_up() {
@@ -144,5 +225,38 @@ mod tests {
             / CYCLE_COUNTER_TICK_NS as f64)
             .ceil() as u32;
         assert_eq!(tolerance_ticks(cycle_ns), expected.max(1));
+    }
+
+    #[test]
+    fn handle_input_packet_accepts_ethernet_padding() {
+        let process_image = TestProcessImage::default();
+        let stream = build_stream(16);
+        let payload_with_padding = vec![0x12, 0x34, 0x00, 0x00, 0x00];
+
+        handle_input_packet(&process_image, &stream, &payload_with_padding).unwrap();
+
+        let writes = process_image
+            .written_payloads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0], vec![0x12, 0x34]);
+    }
+
+    #[test]
+    fn handle_input_packet_rejects_payload_shorter_than_stream_size() {
+        let process_image = TestProcessImage::default();
+        let stream = build_stream(16);
+        let short_payload = vec![0x12];
+
+        let result = handle_input_packet(&process_image, &stream, &short_payload);
+        assert_eq!(result, Err(StatusCode::ErrInvalidLen));
+    }
+
+    #[test]
+    fn absolute_cycle_jitter_returns_absolute_delta() {
+        assert_eq!(absolute_cycle_jitter_ns(2_000_000, 2_000_000), 0);
+        assert_eq!(absolute_cycle_jitter_ns(2_200_000, 2_000_000), 200_000);
+        assert_eq!(absolute_cycle_jitter_ns(1_800_000, 2_000_000), 200_000);
     }
 }

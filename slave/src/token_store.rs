@@ -93,7 +93,7 @@ pub struct TokenStore {
 }
 
 impl TokenStore {
-    fn new(expected_shared_key: PreSharedKey) -> Self {
+    pub fn new(expected_shared_key: PreSharedKey) -> Self {
         Self {
             expected_shared_key,
             tokens: Arc::new(Mutex::new(HashMap::new())),

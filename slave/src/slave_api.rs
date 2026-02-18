@@ -179,9 +179,7 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
             loop {
                 let state = status_store.get_status().await.state;
                 if state == DeviceState::Error as i32 || state == DeviceState::Shutdown as i32 {
-                    warn!(
-                        "Subscribe publish task terminated, because device state is {state}"
-                    );
+                    warn!("Subscribe publish task terminated, because device state is {state}");
                     break;
                 }
 
@@ -345,19 +343,6 @@ impl slave_api::slave_api_server::SlaveApi for SlaveApiService {
         Ok(Response::new(GetTokenResponse {
             token,
             status: StatusCode::NoError as i32,
-        }))
-    }
-
-    async fn reset_sequence_number(
-        &self,
-        request: Request<slave_api::Empty>,
-    ) -> Result<Response<StatusResponse>, Status> {
-        self.validate_token(&request)?;
-
-        // TODO: Add reset of the sequence number of the discovery and L2 protocol security
-
-        Ok(Response::new(StatusResponse {
-            code: StatusCode::ErrNotSupported as i32,
         }))
     }
 }
