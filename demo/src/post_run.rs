@@ -131,8 +131,8 @@ fn parse_slave_missed_cycles(master_log: &str) -> (u64, u64) {
 
     for line in master_log.lines() {
         if line.contains("Temperature status update:") {
-            temperature_missed_cycles = parse_numeric_field_u64(line, "missed_cycles")
-                .unwrap_or(temperature_missed_cycles);
+            temperature_missed_cycles =
+                parse_numeric_field_u64(line, "missed_cycles").unwrap_or(temperature_missed_cycles);
         } else if line.contains("Valve status update:") {
             valve_missed_cycles =
                 parse_numeric_field_u64(line, "missed_cycles").unwrap_or(valve_missed_cycles);
@@ -164,8 +164,7 @@ fn parse_control_metrics(master_log: &str) -> MasterControlMetrics {
                 && previous
                 && !valve_open
             {
-                metrics.valve_open_close_cycles =
-                    metrics.valve_open_close_cycles.saturating_add(1);
+                metrics.valve_open_close_cycles = metrics.valve_open_close_cycles.saturating_add(1);
             }
             previous_valve_state = Some(valve_open);
         }
@@ -207,17 +206,9 @@ fn parse_system_performance_metrics(master_log: &str) -> SystemPerformanceMetric
         let ram_max_mib = parse_numeric_field_f64(line, "ram_max_mib");
         let ram_avg_mib = parse_numeric_field_f64(line, "ram_avg_mib");
 
-        if let (
-            Some(cpu_max_pct),
-            Some(cpu_avg_pct),
-            Some(ram_max_mib),
-            Some(ram_avg_mib),
-        ) = (
-            cpu_max_pct,
-            cpu_avg_pct,
-            ram_max_mib,
-            ram_avg_mib,
-        ) {
+        if let (Some(cpu_max_pct), Some(cpu_avg_pct), Some(ram_max_mib), Some(ram_avg_mib)) =
+            (cpu_max_pct, cpu_avg_pct, ram_max_mib, ram_avg_mib)
+        {
             return SystemPerformanceMetrics {
                 cpu_max_pct,
                 cpu_avg_pct,
@@ -237,9 +228,7 @@ fn format_cycle_line(prefix: &str, stats: Option<CycleStats>) -> String {
             let min_ms = stats.min_ns as f64 / 1_000_000.0;
             let max_ms = stats.max_ns as f64 / 1_000_000.0;
             let avg_ms = stats.avg_ns as f64 / 1_000_000.0;
-            format!(
-                "  {prefix}: min_ms={min_ms:.3} max_ms={max_ms:.3} avg_ms={avg_ms:.3}"
-            )
+            format!("  {prefix}: min_ms={min_ms:.3} max_ms={max_ms:.3} avg_ms={avg_ms:.3}")
         }
         None => format!("  {prefix}: unavailable"),
     }
@@ -247,8 +236,7 @@ fn format_cycle_line(prefix: &str, stats: Option<CycleStats>) -> String {
 
 pub fn run_post_run_log_analysis(log_directory: &Path) -> Result<(), String> {
     let master_log_path = log_directory.join(format!("{MASTER_LOG_COMPONENT}.log"));
-    let temperature_log_path =
-        log_directory.join(format!("{TEMPERATURE_SLAVE_LOG_COMPONENT}.log"));
+    let temperature_log_path = log_directory.join(format!("{TEMPERATURE_SLAVE_LOG_COMPONENT}.log"));
     let valve_log_path = log_directory.join(format!("{VALVE_SLAVE_LOG_COMPONENT}.log"));
 
     let master_content = fs::read_to_string(&master_log_path)
@@ -266,7 +254,8 @@ pub fn run_post_run_log_analysis(log_directory: &Path) -> Result<(), String> {
     let valve_jitter = parse_device_jitter(&valve_content);
 
     let master_missed_cycles = parse_master_missed_cycles(&master_content);
-    let (temperature_missed_cycles, valve_missed_cycles) = parse_slave_missed_cycles(&master_content);
+    let (temperature_missed_cycles, valve_missed_cycles) =
+        parse_slave_missed_cycles(&master_content);
     let control_metrics = parse_control_metrics(&master_content);
     let system_performance_metrics = parse_system_performance_metrics(&master_content);
 

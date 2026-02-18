@@ -18,7 +18,8 @@
 use common::hardware_abstraction::ProcessImageAccess;
 use common::l2_types::{L2Header, build_l2_frame, parse_l2_frame};
 use common::l2_utils::{
-    CycleMetrics, absolute_cycle_jitter_ns, build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet, parse_destination_mac, ticks_per_cycle, tolerance_ticks
+    CycleMetrics, absolute_cycle_jitter_ns, build_frame_payload, cycle_counter, find_interface,
+    gcd_all, handle_input_packet, parse_destination_mac, ticks_per_cycle, tolerance_ticks,
 };
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::state_machine::DeviceStateManager;

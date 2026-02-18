@@ -26,8 +26,8 @@ use slave::{
 };
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -276,7 +276,10 @@ fn run_slave_thread(config: DemoSlaveConfig, shared_key: PreSharedKey) -> Result
         loop {
             let current_state = state_manager.get_state();
             if previous_state != Some(current_state) {
-                info!("Slave state changed: {:?} -> {:?}", previous_state, current_state);
+                info!(
+                    "Slave state changed: {:?} -> {:?}",
+                    previous_state, current_state
+                );
                 previous_state = Some(current_state);
             }
 
@@ -404,9 +407,17 @@ async fn run_master_thread() -> Result<(), String> {
             let current_process = read_process_cpu_jiffies();
             let current_ram_mib = read_process_resident_mib();
 
-            if let (Some(previous_total_value), Some(previous_process_value), Some(current_total_value), Some(current_process_value)) =
-                (previous_total, previous_process, current_total, current_process)
-            {
+            if let (
+                Some(previous_total_value),
+                Some(previous_process_value),
+                Some(current_total_value),
+                Some(current_process_value),
+            ) = (
+                previous_total,
+                previous_process,
+                current_total,
+                current_process,
+            ) {
                 let total_delta = current_total_value.saturating_sub(previous_total_value);
                 let process_delta = current_process_value.saturating_sub(previous_process_value);
 

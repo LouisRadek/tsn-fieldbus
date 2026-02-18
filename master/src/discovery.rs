@@ -427,9 +427,7 @@ impl DiscoveryMaster {
     /// or `None` if no frame is available.
     fn receive_raw_frame_nonblocking(&mut self) -> Option<Vec<u8>> {
         match self.receiver.next() {
-            Ok(data) => {
-                Some(data.to_vec())
-            }
+            Ok(data) => Some(data.to_vec()),
             Err(e) => {
                 debug!("No frame received: {e}");
                 None
@@ -451,7 +449,11 @@ impl DiscoveryMaster {
                 Ok(data) => {
                     if let Some(ethernet_frame) = EthernetPacket::new(data) {
                         if ethernet_frame.get_ethertype().0 != ETHERTYPE_SDCP {
-                            debug!("Frame ethertype mismatch: got {}, expected {} Skipping", ethernet_frame.get_ethertype().0, ETHERTYPE_SDCP);
+                            debug!(
+                                "Frame ethertype mismatch: got {}, expected {} Skipping",
+                                ethernet_frame.get_ethertype().0,
+                                ETHERTYPE_SDCP
+                            );
                             continue;
                         }
 
