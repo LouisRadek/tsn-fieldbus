@@ -112,6 +112,10 @@ pub fn parse_destination_mac(stream: &StreamConfig) -> MacAddr {
     )
 }
 
+pub fn absolute_cycle_jitter_ns(observed_cycle_ns: u64, target_cycle_ns: u64) -> u64 {
+    observed_cycle_ns.abs_diff(target_cycle_ns)
+}
+
 #[derive(Default)]
 pub struct CycleMetrics {
     pub min_ns: Option<u64>,
@@ -247,5 +251,12 @@ mod tests {
 
         let result = handle_input_packet(&process_image, &stream, &short_payload);
         assert_eq!(result, Err(StatusCode::ErrInvalidLen));
+    }
+
+    #[test]
+    fn absolute_cycle_jitter_returns_absolute_delta() {
+        assert_eq!(absolute_cycle_jitter_ns(2_000_000, 2_000_000), 0);
+        assert_eq!(absolute_cycle_jitter_ns(2_200_000, 2_000_000), 200_000);
+        assert_eq!(absolute_cycle_jitter_ns(1_800_000, 2_000_000), 200_000);
     }
 }

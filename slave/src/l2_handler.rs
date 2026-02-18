@@ -19,7 +19,7 @@ use crate::DeviceStatusStore;
 use common::hardware_abstraction::ProcessImageAccess;
 use common::l2_types::{L2Header, build_l2_frame, parse_l2_frame};
 use common::l2_utils::{
-    CycleMetrics, build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet, parse_destination_mac, ticks_per_cycle, tolerance_ticks
+    CycleMetrics, absolute_cycle_jitter_ns, build_frame_payload, cycle_counter, find_interface, gcd_all, handle_input_packet, parse_destination_mac, ticks_per_cycle, tolerance_ticks
 };
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::stream_store::StreamStore;
@@ -155,6 +155,7 @@ fn spawn_receiver_thread(
         let mut last_cycle_counter: HashMap<u16, u16> = HashMap::new();
         let mut last_receive_instant_by_stream: HashMap<u16, Instant> = HashMap::new();
         let mut receive_metrics = CycleMetrics::default();
+        let mut receive_jitter_metrics = CycleMetrics::default();
         let mut previous_state: Option<DeviceState> = None;
 
         loop {
@@ -236,7 +237,12 @@ fn spawn_receiver_thread(
 
             let now = Instant::now();
             if let Some(previous) = last_receive_instant_by_stream.insert(stream_id, now) {
-                receive_metrics.record(now.duration_since(previous).as_nanos() as u64);
+                let observed_cycle_ns = now.duration_since(previous).as_nanos() as u64;
+                receive_metrics.record(observed_cycle_ns);
+                receive_jitter_metrics.record(absolute_cycle_jitter_ns(
+                    observed_cycle_ns,
+                    stream.cycle_time_nano as u64,
+                ));
                 if let Some((min_ns, max_ns, average_ns)) = receive_metrics.values() {
                     runtime.block_on(status_store.update_receive_cycle_metrics(
                         min_ns,
@@ -260,6 +266,17 @@ fn spawn_receiver_thread(
             );
         } else {
             info!("L2 cycle metrics component=slave direction=receive unavailable=true");
+        }
+        if let Some((min_ns, max_ns, average_ns)) = receive_jitter_metrics.values() {
+            info!(
+                "L2 jitter metrics component=slave direction=receive min_ns={} max_ns={} avg_ns={} samples={}",
+                min_ns,
+                max_ns,
+                average_ns,
+                receive_jitter_metrics.samples
+            );
+        } else {
+            info!("L2 jitter metrics component=slave direction=receive unavailable=true");
         }
         info!("Slave L2 receiver thread terminated");
     })
@@ -292,6 +309,8 @@ fn spawn_sender_thread(
         );
         let mut last_sent: HashMap<u16, Instant> = HashMap::new();
         let mut send_metrics = CycleMetrics::default();
+        let mut send_jitter_metrics = CycleMetrics::default();
+        let mut previous_state: Option<DeviceState> = None;
 
         runtime.block_on(async move {
             let mut interval = time::interval(Duration::from_nanos(base_cycle as u64));
@@ -300,6 +319,10 @@ fn spawn_sender_thread(
 
                 let status = status_store.get_status().await;
                 let state = DeviceState::try_from(status.state).unwrap_or(DeviceState::Init);
+                if previous_state != Some(state) {
+                    last_sent.clear();
+                    previous_state = Some(state);
+                }
                 if state != DeviceState::Op && state != DeviceState::SafeOp {
                     info!("Slave L2 sender thread exiting due to state: {state:?}");
                     break;
@@ -318,13 +341,22 @@ fn spawn_sender_thread(
                     }
 
                     let now = Instant::now();
-                    if let Some(previous) = last_sent.insert(stream_id, now) {
-                        send_metrics.record(now.duration_since(previous).as_nanos() as u64);
-                        if let Some((min_ns, max_ns, average_ns)) = send_metrics.values() {
-                            status_store
-                                .update_send_cycle_metrics(min_ns, max_ns, average_ns)
-                                .await;
+                    if state == DeviceState::Op {
+                        if let Some(previous) = last_sent.insert(stream_id, now) {
+                            let observed_cycle_ns = now.duration_since(previous).as_nanos() as u64;
+                            send_metrics.record(observed_cycle_ns);
+                            send_jitter_metrics.record(absolute_cycle_jitter_ns(
+                                observed_cycle_ns,
+                                cycle_time as u64,
+                            ));
+                            if let Some((min_ns, max_ns, average_ns)) = send_metrics.values() {
+                                status_store
+                                    .update_send_cycle_metrics(min_ns, max_ns, average_ns)
+                                    .await;
+                            }
                         }
+                    } else {
+                        last_sent.insert(stream_id, now);
                     }
 
                     let mut status = StatusCode::NoError;
@@ -372,6 +404,17 @@ fn spawn_sender_thread(
                 );
             } else {
                 info!("L2 cycle metrics component=slave direction=send unavailable=true");
+            }
+            if let Some((min_ns, max_ns, average_ns)) = send_jitter_metrics.values() {
+                info!(
+                    "L2 jitter metrics component=slave direction=send min_ns={} max_ns={} avg_ns={} samples={}",
+                    min_ns,
+                    max_ns,
+                    average_ns,
+                    send_jitter_metrics.samples
+                );
+            } else {
+                info!("L2 jitter metrics component=slave direction=send unavailable=true");
             }
         });
         info!("Slave L2 sender thread terminated");

@@ -26,7 +26,7 @@ use slave::{
 };
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,6 +51,72 @@ const TEMPERATURE_STREAM_ID: u32 = 1001;
 const VALVE_STREAM_ID: u32 = 1002;
 const TEMPERATURE_STREAM_CYCLE_NS: u32 = 1_000_000;
 const VALVE_STREAM_CYCLE_NS: u32 = 1_000_000;
+const PERFORMANCE_SAMPLE_INTERVAL_MS: u64 = 50;
+
+#[derive(Default)]
+struct AggregateF64 {
+    max: f64,
+    total: f64,
+    samples: u64,
+}
+
+impl AggregateF64 {
+    fn record(&mut self, value: f64) {
+        self.max = self.max.max(value);
+        self.total += value;
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    fn average(&self) -> f64 {
+        if self.samples == 0 {
+            return 0.0;
+        }
+        self.total / self.samples as f64
+    }
+}
+
+#[derive(Default)]
+struct PerformanceStats {
+    cpu: AggregateF64,
+    ram_mib: AggregateF64,
+}
+
+fn read_total_cpu_jiffies() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/stat").ok()?;
+    let first_line = content.lines().next()?;
+    let mut fields = first_line.split_whitespace();
+    let label = fields.next()?;
+    if label != "cpu" {
+        return None;
+    }
+    let mut total = 0u64;
+    for value in fields {
+        total = total.saturating_add(value.parse::<u64>().ok()?);
+    }
+    Some(total)
+}
+
+fn read_process_cpu_jiffies() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let fields = content.split_whitespace().collect::<Vec<_>>();
+    if fields.len() <= 14 {
+        return None;
+    }
+    let utime = fields[13].parse::<u64>().ok()?;
+    let stime = fields[14].parse::<u64>().ok()?;
+    Some(utime.saturating_add(stime))
+}
+
+fn read_process_resident_mib() -> Option<f64> {
+    let content = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages = content.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return None;
+    }
+    let resident_bytes = resident_pages.saturating_mul(page_size as u64);
+    Some(resident_bytes as f64 / (1024.0 * 1024.0))
+}
 
 #[derive(Clone, Copy)]
 enum DemoSlaveRole {
@@ -322,6 +388,46 @@ async fn run_master_thread() -> Result<(), String> {
     if let Err(error) = try_set_realtime_priority(99) {
         warn!("Unable to set real-time priority for master: {error}");
     }
+
+    let performance_stop = Arc::new(AtomicBool::new(false));
+    let performance_stats = Arc::new(Mutex::new(PerformanceStats::default()));
+    let performance_stats_worker = performance_stats.clone();
+    let performance_stop_worker = performance_stop.clone();
+    let performance_task = tokio::spawn(async move {
+        let mut previous_total = read_total_cpu_jiffies();
+        let mut previous_process = read_process_cpu_jiffies();
+
+        while !performance_stop_worker.load(Ordering::Relaxed) {
+            time::sleep(Duration::from_millis(PERFORMANCE_SAMPLE_INTERVAL_MS)).await;
+
+            let current_total = read_total_cpu_jiffies();
+            let current_process = read_process_cpu_jiffies();
+            let current_ram_mib = read_process_resident_mib();
+
+            if let (Some(previous_total_value), Some(previous_process_value), Some(current_total_value), Some(current_process_value)) =
+                (previous_total, previous_process, current_total, current_process)
+            {
+                let total_delta = current_total_value.saturating_sub(previous_total_value);
+                let process_delta = current_process_value.saturating_sub(previous_process_value);
+
+                if total_delta > 0 {
+                    let cpu_percent = (process_delta as f64 / total_delta as f64) * 100.0;
+                    if let Ok(mut guard) = performance_stats_worker.lock() {
+                        guard.cpu.record(cpu_percent);
+                    }
+                }
+            }
+
+            if let Some(ram_mib) = current_ram_mib
+                && let Ok(mut guard) = performance_stats_worker.lock()
+            {
+                guard.ram_mib.record(ram_mib);
+            }
+
+            previous_total = current_total;
+            previous_process = current_process;
+        }
+    });
 
     let device_state_manager = DeviceStateManager::new();
     device_state_manager
@@ -636,7 +742,7 @@ async fn run_master_thread() -> Result<(), String> {
     let operation_start = Instant::now();
     let mut previous_temperature = 0u16;
     let mut previous_valve_state = false;
-    while operation_start.elapsed() < Duration::from_secs(30) {
+    while operation_start.elapsed() < Duration::from_secs(60) {
         interval.tick().await;
         let temperature = process_image.read_temperature_u16();
         let valve_open = temperature > 100;
@@ -677,6 +783,19 @@ async fn run_master_thread() -> Result<(), String> {
 
     status_task_temperature.abort();
     status_task_valve.abort();
+
+    performance_stop.store(true, Ordering::Relaxed);
+    let _ = performance_task.await;
+
+    if let Ok(guard) = performance_stats.lock() {
+        info!(
+            "System performance: cpu_max_pct={:.2} cpu_avg_pct={:.2} ram_max_mib={:.2} ram_avg_mib={:.2}",
+            guard.cpu.max,
+            guard.cpu.average(),
+            guard.ram_mib.max,
+            guard.ram_mib.average()
+        );
+    }
 
     Ok(())
 }
