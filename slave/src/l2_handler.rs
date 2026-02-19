@@ -22,6 +22,7 @@ use common::l2_utils::{
     CycleMetrics, absolute_cycle_jitter_ns, build_frame_payload, cycle_counter, find_interface,
     gcd_all, handle_input_packet, parse_destination_mac, ticks_per_cycle, tolerance_ticks,
 };
+use common::security::auth_footer::SecurityFooter;
 use common::slave_api::{DeviceState, Direction, StatusCode, StreamConfig};
 use common::stream_store::StreamStore;
 use log::{debug, error, info, warn};
@@ -79,6 +80,7 @@ pub fn start_l2_handler(
     let receiver_handle = spawn_receiver_thread(
         receiver,
         input_streams,
+        stream_store.clone(),
         status_store.clone(),
         process_image.clone(),
         format!("slave-{interface_name}"),
@@ -87,6 +89,7 @@ pub fn start_l2_handler(
         transmitter,
         interface,
         output_streams,
+        stream_store,
         status_store,
         process_image,
         format!("slave-{interface_name}"),
@@ -113,6 +116,7 @@ pub fn start_l2_handler_with_mocks(
     let receiver_handle = spawn_receiver_thread(
         receiver,
         input_streams,
+        stream_store.clone(),
         status_store.clone(),
         process_image.clone(),
         "slave-mock".to_string(),
@@ -121,6 +125,7 @@ pub fn start_l2_handler_with_mocks(
         transmitter,
         interface,
         output_streams,
+        stream_store,
         status_store,
         process_image,
         "slave-mock".to_string(),
@@ -135,6 +140,7 @@ pub fn start_l2_handler_with_mocks(
 fn spawn_receiver_thread(
     mut receiver: Box<dyn DataLinkReceiver>,
     streams: Vec<StreamConfig>,
+    stream_store: StreamStore,
     status_store: DeviceStatusStore,
     process_image: Arc<dyn ProcessImageAccess>,
     thread_group: String,
@@ -201,6 +207,24 @@ fn spawn_receiver_thread(
                 runtime.block_on(status_store.update_status_code(StatusCode::ErrStreamIdUnknown));
                 continue;
             };
+
+            let stream_auth_valid = stream_store.validate_stream_tag(
+                &parsed.header,
+                parsed.payload,
+                parsed.sequence_number,
+                &parsed.auth_tag,
+            );
+            match stream_auth_valid {
+                Ok(true) => {}
+                Ok(false) => {
+                    runtime.block_on(status_store.update_status_code(StatusCode::ErrAuthFailed));
+                    continue;
+                }
+                Err(code) => {
+                    runtime.block_on(status_store.update_status_code(code));
+                    continue;
+                }
+            }
 
             debug!(
                 "L2 input stream={stream_id}"
@@ -288,6 +312,7 @@ fn spawn_sender_thread(
     mut transmitter: Box<dyn DataLinkSender>,
     interface: NetworkInterface,
     streams: Vec<StreamConfig>,
+    stream_store: StreamStore,
     status_store: DeviceStatusStore,
     process_image: Arc<dyn ProcessImageAccess>,
     thread_group: String,
@@ -373,12 +398,25 @@ fn spawn_sender_thread(
                     let destination = parse_destination_mac(stream);
                     let header =
                         L2Header::new(stream.stream_id as u16, cycle_counter(), status as u8);
+                    let (sequence_number, auth_tag) =
+                        match stream_store.generate_stream_tag(&header, &payload) {
+                            Ok(result) => result,
+                            Err(code) => {
+                                status_store.update_status_code(code).await;
+                                continue;
+                            }
+                        };
+
                     let frame = build_l2_frame(
                         source_mac,
                         destination,
                         stream.vlan_id_pcp as u16,
                         &header,
                         &payload,
+                        &SecurityFooter {
+                            sequence_number,
+                            auth_tag,
+                        },
                     );
 
                     debug!(

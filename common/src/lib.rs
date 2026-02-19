@@ -3,6 +3,7 @@ pub mod discovery_types;
 pub mod hardware_abstraction;
 pub mod l2_types;
 pub mod l2_utils;
+pub mod security;
 pub mod state_machine;
 pub mod stream_store;
 

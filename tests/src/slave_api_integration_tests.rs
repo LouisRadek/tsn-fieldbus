@@ -47,7 +47,7 @@ async fn start_slave_server() -> (SocketAddr, DeviceStatusStore, tokio::task::Jo
     let state_manager = DeviceStateManager::new();
     let status_store = DeviceStatusStore::new();
     let token_store = TokenStore::from_env().expect("token store from env");
-    let stream_store = StreamStore::new();
+    let stream_store = StreamStore::new(SHARED_KEY_BYTES);
 
     let status_store_clone = status_store.clone();
 

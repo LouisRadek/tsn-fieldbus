@@ -34,6 +34,9 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use pnet::util::MacAddr;
 use std::io::{self, Cursor};
 
+use crate::security::auth_footer::{
+    SECURITY_FOOTER_SIZE, SecurityFooter, split_payload_and_footer,
+};
 use crate::slave_api::StatusCode;
 
 pub const ETHERTYPE_L2_PROTOCOL: u16 = 0x88B6;
@@ -130,6 +133,8 @@ pub struct ParsedL2Frame<'a> {
     pub vlan_id_pcp: u16,
     pub header: L2Header,
     pub payload: &'a [u8],
+    pub sequence_number: u64,
+    pub auth_tag: [u8; 32],
 }
 
 pub fn build_l2_frame(
@@ -138,8 +143,9 @@ pub fn build_l2_frame(
     vlan_id_pcp: u16,
     header: &L2Header,
     payload: &[u8],
+    security_footer: &SecurityFooter,
 ) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(18 + L2_HEADER_SIZE + payload.len());
+    let mut frame = Vec::with_capacity(18 + L2_HEADER_SIZE + payload.len() + SECURITY_FOOTER_SIZE);
     frame.extend_from_slice(&destination.octets());
     frame.extend_from_slice(&source.octets());
     frame.write_u16::<BigEndian>(VLAN_ETHERTYPE).unwrap();
@@ -149,6 +155,7 @@ pub fn build_l2_frame(
         .unwrap();
     header.write_to(&mut frame).unwrap();
     frame.extend_from_slice(payload);
+    security_footer.write_to(&mut frame);
     frame
 }
 
@@ -180,7 +187,8 @@ pub fn parse_l2_frame(frame: &[u8]) -> Result<ParsedL2Frame<'_>, StatusCode> {
 
     let header = L2Header::read_from(&frame[l2_header_offset..l2_header_offset + L2_HEADER_SIZE])
         .map_err(|_| StatusCode::ErrFrameParsing)?;
-    let payload = &frame[l2_header_offset + L2_HEADER_SIZE..];
+    let payload_with_footer = &frame[l2_header_offset + L2_HEADER_SIZE..];
+    let (payload, security_footer) = split_payload_and_footer(payload_with_footer)?;
 
     Ok(ParsedL2Frame {
         destination,
@@ -188,6 +196,8 @@ pub fn parse_l2_frame(frame: &[u8]) -> Result<ParsedL2Frame<'_>, StatusCode> {
         vlan_id_pcp,
         header,
         payload,
+        sequence_number: security_footer.sequence_number,
+        auth_tag: security_footer.auth_tag,
     })
 }
 
@@ -267,7 +277,11 @@ mod tests {
         let source = MacAddr::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
         let destination = MacAddr::new(0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB);
         let vlan_id_pcp = 0x1234;
-        let frame = build_l2_frame(source, destination, vlan_id_pcp, &header, &payload);
+        let footer = SecurityFooter {
+            sequence_number: 1,
+            auth_tag: [0xAA; 32],
+        };
+        let frame = build_l2_frame(source, destination, vlan_id_pcp, &header, &payload, &footer);
 
         let parsed = parse_l2_frame(&frame).expect("frame should parse");
         assert_eq!(parsed.destination, destination);
@@ -275,6 +289,8 @@ mod tests {
         assert_eq!(parsed.vlan_id_pcp, vlan_id_pcp);
         assert_eq!(parsed.header, header);
         assert_eq!(parsed.payload, payload.as_slice());
+        assert_eq!(parsed.sequence_number, footer.sequence_number);
+        assert_eq!(parsed.auth_tag, footer.auth_tag);
     }
 
     #[test]
@@ -290,6 +306,11 @@ mod tests {
         frame.write_u16::<BigEndian>(ETHERTYPE_L2_PROTOCOL).unwrap();
         header.write_to(&mut frame).unwrap();
         frame.extend_from_slice(&payload);
+        SecurityFooter {
+            sequence_number: 9,
+            auth_tag: [0x55; 32],
+        }
+        .write_to(&mut frame);
 
         let parsed = parse_l2_frame(&frame).expect("untagged frame should parse");
         assert_eq!(parsed.destination, destination);
@@ -297,5 +318,7 @@ mod tests {
         assert_eq!(parsed.vlan_id_pcp, 0);
         assert_eq!(parsed.header, header);
         assert_eq!(parsed.payload, payload.as_slice());
+        assert_eq!(parsed.sequence_number, 9);
+        assert_eq!(parsed.auth_tag, [0x55; 32]);
     }
 }

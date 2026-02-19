@@ -5,6 +5,8 @@ use common::demo_runtime::{
     DEMO_MASTER_INTERFACE, DEMO_TEMPERATURE_INTERFACE, DEMO_VALVE_INTERFACE, build_vlan_tag,
     setup_demo_network, teardown_demo_network, try_set_realtime_priority,
 };
+use common::security::discovery_auth::DiscoveryAuthHandler;
+use common::security::shared_secret::load_shared_secret_from_env;
 use common::slave_api::{DeviceState, Direction, Position, StreamConfig, SubscribeStatusRequest};
 use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
@@ -34,12 +36,6 @@ use tokio::task::JoinHandle;
 use tokio::time;
 
 const LOG_DIRECTORY: &str = "logs";
-const SHARED_KEY_BYTES: [u8; 32] = [
-    0x31, 0x7A, 0x55, 0x9E, 0x42, 0x0B, 0x7D, 0x10, 0x2A, 0xCC, 0x6F, 0x88, 0x13, 0x47, 0xA5, 0xB1,
-    0xE4, 0x2D, 0x90, 0x73, 0x1C, 0x5F, 0x6A, 0x0E, 0x99, 0xD2, 0x3B, 0x84, 0xF0, 0x11, 0x26, 0xC7,
-];
-const SHARED_KEY: PreSharedKey = PreSharedKey(SHARED_KEY_BYTES);
-
 const TEMPERATURE_SLAVE_MAC: [u8; 6] = [0x02, 0x42, 0xAC, 0x10, 0x00, 0x11];
 const VALVE_SLAVE_MAC: [u8; 6] = [0x02, 0x42, 0xAC, 0x10, 0x00, 0x12];
 const TEMPERATURE_SLAVE_IP: [u8; 4] = [10, 10, 0, 11];
@@ -131,6 +127,7 @@ struct DemoSlaveConfig {
     mac_address: [u8; 6],
     api_ip: [u8; 4],
     component: &'static str,
+    trusted_master_mac: [u8; 6],
 }
 
 async fn wait_for_slave_state(
@@ -198,7 +195,10 @@ fn spawn_valve_update_task(hardware: Arc<DummyHardware>) -> JoinHandle<()> {
     })
 }
 
-fn run_slave_thread(config: DemoSlaveConfig, shared_key: PreSharedKey) -> Result<(), String> {
+fn run_slave_thread(config: DemoSlaveConfig) -> Result<(), String> {
+    let shared_secret = load_shared_secret_from_env()
+        .map_err(|error| format!("Failed to load shared secret for slave runtime: {error}"))?;
+
     set_log_component(config.component);
     info!(
         "Starting slave runtime role={} interface={} api_ip={}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -250,8 +250,17 @@ fn run_slave_thread(config: DemoSlaveConfig, shared_key: PreSharedKey) -> Result
         let status_store = DeviceStatusStore::new();
         status_store.update_state(DeviceState::DiscoverySync).await;
 
-        let token_store = TokenStore::new(shared_key);
-        let stream_store = StreamStore::new();
+        let token_store = TokenStore::new(PreSharedKey(shared_secret));
+        let stream_store = StreamStore::new(shared_secret);
+        let discovery_auth_handler = DiscoveryAuthHandler::new(shared_secret);
+        discovery_auth_handler.add_new_device(MacAddr::new(
+            config.trusted_master_mac[0],
+            config.trusted_master_mac[1],
+            config.trusted_master_mac[2],
+            config.trusted_master_mac[3],
+            config.trusted_master_mac[4],
+            config.trusted_master_mac[5],
+        ));
 
         let device_info_access = hardware.clone();
         let process_image_access = hardware.clone();
@@ -262,6 +271,7 @@ fn run_slave_thread(config: DemoSlaveConfig, shared_key: PreSharedKey) -> Result
             state_manager.clone(),
             device_info_access.clone(),
             network_interface_access,
+            discovery_auth_handler,
         )
         .map_err(|code| {
             error!("Failed to start slave L2 handler: {code:?}");
@@ -386,6 +396,9 @@ fn run_slave_thread(config: DemoSlaveConfig, shared_key: PreSharedKey) -> Result
 }
 
 async fn run_master_thread() -> Result<(), String> {
+    let shared_secret = load_shared_secret_from_env()
+        .map_err(|error| format!("Failed to load shared secret for master runtime: {error}"))?;
+
     set_log_component(MASTER_LOG_COMPONENT);
     info!("Starting master runtime on interface {DEMO_MASTER_INTERFACE}");
     if let Err(error) = try_set_realtime_priority(99) {
@@ -445,9 +458,12 @@ async fn run_master_thread() -> Result<(), String> {
         .set_target_state(DeviceState::DiscoverySync)
         .map_err(|code| format!("Master cannot enter discovery state: {code:?}"))?;
 
-    let mut discovery_master =
-        DiscoveryMaster::new(DEMO_MASTER_INTERFACE, device_state_manager.clone())
-            .map_err(|code| format!("Failed to create discovery master: {code:?}"))?;
+    let mut discovery_master = DiscoveryMaster::new(
+        DEMO_MASTER_INTERFACE,
+        device_state_manager.clone(),
+        shared_secret,
+    )
+    .map_err(|code| format!("Failed to create discovery master: {code:?}"))?;
 
     let mut discovered = Vec::new();
     for _ in 0..10 {
@@ -513,14 +529,14 @@ async fn run_master_thread() -> Result<(), String> {
 
     let mut temperature_client = SlaveApiClient::connect(
         to_http_endpoint(TEMPERATURE_SLAVE_IP, 50051),
-        SHARED_KEY_BYTES.to_vec(),
+        shared_secret.to_vec(),
     )
     .await
     .map_err(|error| format!("Failed to connect temperature slave API: {error}"))?;
 
     let mut valve_client = SlaveApiClient::connect(
         to_http_endpoint(VALVE_SLAVE_IP, 50051),
-        SHARED_KEY_BYTES.to_vec(),
+        shared_secret.to_vec(),
     )
     .await
     .map_err(|error| format!("Failed to connect valve slave API: {error}"))?;
@@ -659,7 +675,7 @@ async fn run_master_thread() -> Result<(), String> {
         build_vlan_tag(100, 3)
     );
 
-    let stream_store = StreamStore::new();
+    let stream_store = StreamStore::new(shared_secret);
     stream_store
         .add_stream_config(temperature_stream_master)
         .map_err(|code| format!("Failed to add master input stream: {code:?}"))?;
@@ -831,6 +847,10 @@ fn main() {
         std::process::exit(1);
     }
 
+    let master_mac = resolve_interface_mac(DEMO_MASTER_INTERFACE)
+        .expect("Master MAC must be resolvable after demo network setup");
+    let trusted_master_mac = master_mac.octets();
+
     let stop_monitor = Arc::new(AtomicBool::new(false));
 
     let temperature_slave = DemoSlaveConfig {
@@ -839,6 +859,7 @@ fn main() {
         mac_address: TEMPERATURE_SLAVE_MAC,
         api_ip: TEMPERATURE_SLAVE_IP,
         component: TEMPERATURE_SLAVE_LOG_COMPONENT,
+        trusted_master_mac,
     };
 
     let valve_slave = DemoSlaveConfig {
@@ -847,16 +868,17 @@ fn main() {
         mac_address: VALVE_SLAVE_MAC,
         api_ip: VALVE_SLAVE_IP,
         component: VALVE_SLAVE_LOG_COMPONENT,
+        trusted_master_mac,
     };
 
     let temperature_thread = thread::Builder::new()
         .name("slave-temp".to_string())
-        .spawn(move || run_slave_thread(temperature_slave, SHARED_KEY))
+        .spawn(move || run_slave_thread(temperature_slave))
         .expect("Failed to spawn temperature slave thread");
 
     let valve_thread = thread::Builder::new()
         .name("slave-valve".to_string())
-        .spawn(move || run_slave_thread(valve_slave, SHARED_KEY))
+        .spawn(move || run_slave_thread(valve_slave))
         .expect("Failed to spawn valve slave thread");
 
     thread::sleep(Duration::from_millis(500));

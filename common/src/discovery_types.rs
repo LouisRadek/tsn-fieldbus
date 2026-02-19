@@ -38,6 +38,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use pnet::util::MacAddr;
 use std::io::{self, Cursor, Read};
 
+use crate::security::auth_footer::{SecurityFooter, split_payload_and_footer};
 use crate::slave_api::{IpSource, StatusCode};
 
 pub const ETHERTYPE_SDCP: u16 = 0x88B5;
@@ -409,6 +410,41 @@ impl Tlv {
     }
 }
 
+/// Parsed SDCP payload including security footer.
+#[derive(Debug)]
+pub struct ParsedSdcpPayload<'a> {
+    pub header: SdcpHeader,
+    pub tlv_payload: &'a [u8],
+    pub sequence_number: u64,
+    pub auth_tag: [u8; 32],
+}
+
+/// Parse a raw SDCP payload into header, TLV payload, and security footer.
+pub fn parse_sdcp_payload(payload: &[u8]) -> Result<ParsedSdcpPayload<'_>, StatusCode> {
+    let (payload_without_footer, footer) =
+        split_payload_and_footer(payload).map_err(|_| StatusCode::ErrInvalidLen)?;
+
+    if payload_without_footer.len() < SDCP_HEADER_SIZE as usize {
+        return Err(StatusCode::ErrInvalidLen);
+    }
+
+    let header =
+        SdcpHeader::read_from(payload_without_footer).map_err(|_| StatusCode::ErrFrameParsing)?;
+    let tlv_payload = &payload_without_footer[SDCP_HEADER_SIZE as usize..];
+
+    Ok(ParsedSdcpPayload {
+        header,
+        tlv_payload,
+        sequence_number: footer.sequence_number,
+        auth_tag: footer.auth_tag,
+    })
+}
+
+/// Append a security footer to an SDCP payload buffer.
+pub fn append_sdcp_footer(payload: &mut Vec<u8>, footer: &SecurityFooter) {
+    footer.write_to(payload);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +586,39 @@ mod tests {
 
         let long_status_tlv = Tlv::new(TLV_TYPE_STATUS_REPORT, vec![0; 2]);
         assert!(long_status_tlv.parse_status_report().is_none());
+    }
+
+    #[test]
+    fn test_parse_sdcp_payload_extracts_footer() {
+        let mut payload = Vec::new();
+        let header = SdcpHeader::new(SdcpOpCode::DiscoverReq, 0x1234);
+        header.write_to(&mut payload).unwrap();
+        let tlv = Tlv::device_info(TEST_VENDOR_ID, TEST_DEVICE_ID, TEST_SERIAL);
+        tlv.write_to(&mut payload).unwrap();
+
+        let footer = SecurityFooter {
+            sequence_number: 11,
+            auth_tag: [0xAA; 32],
+        };
+        append_sdcp_footer(&mut payload, &footer);
+
+        let parsed = parse_sdcp_payload(&payload).expect("payload should parse");
+        assert_eq!(parsed.header.op_code, SdcpOpCode::DiscoverReq);
+        let parsed_tlv = Tlv::read_from(parsed.tlv_payload).unwrap();
+        assert_eq!(
+            parsed_tlv.parse_device_info().unwrap().vendor_id,
+            TEST_VENDOR_ID
+        );
+        assert_eq!(parsed.sequence_number, 11);
+        assert_eq!(parsed.auth_tag, [0xAA; 32]);
+    }
+
+    #[test]
+    fn test_parse_sdcp_payload_rejects_short_input() {
+        let short = vec![0u8; SDCP_HEADER_SIZE as usize + 10];
+        assert!(matches!(
+            parse_sdcp_payload(&short),
+            Err(StatusCode::ErrInvalidLen)
+        ));
     }
 }

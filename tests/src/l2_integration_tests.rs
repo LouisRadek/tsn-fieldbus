@@ -2,6 +2,7 @@
 
 use crate::mock_network::MockNetwork;
 use common::hardware_abstraction::ProcessImageAccess;
+use common::l2_types::L2Header;
 use common::slave_api::{DeviceState, Direction, Position, StatusCode, StreamConfig};
 use common::state_machine::DeviceStateManager;
 use common::stream_store::StreamStore;
@@ -15,6 +16,7 @@ use tokio::time::sleep;
 
 const MASTER_MAC: MacAddr = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01);
 const SLAVE_MAC: MacAddr = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
+const TEST_SHARED_SECRET: [u8; 32] = [0x5A; 32];
 
 struct TestProcessImage {
     input_image: RwLock<Vec<u8>>,
@@ -95,7 +97,7 @@ async fn test_l2_handler_bidirectional_streams() {
     let master_interface = create_mock_interface("master0", MASTER_MAC);
     let slave_interface = create_mock_interface("slave0", SLAVE_MAC);
 
-    let master_store = StreamStore::new();
+    let master_store = StreamStore::new(TEST_SHARED_SECRET);
     master_store
         .add_stream_config(build_stream(1, Direction::Output, SLAVE_MAC, 1_000_000))
         .unwrap();
@@ -103,7 +105,7 @@ async fn test_l2_handler_bidirectional_streams() {
         .add_stream_config(build_stream(2, Direction::Input, MASTER_MAC, 1_000_000))
         .unwrap();
 
-    let slave_store = StreamStore::new();
+    let slave_store = StreamStore::new(TEST_SHARED_SECRET);
     slave_store
         .add_stream_config(build_stream(1, Direction::Input, SLAVE_MAC, 1_000_000))
         .unwrap();
@@ -156,4 +158,109 @@ async fn test_l2_handler_bidirectional_streams() {
 
     master_handle.join();
     slave_handle.join();
+}
+
+#[test]
+fn test_stream_security_unidirectional_sequence_logic() {
+    let output_store = StreamStore::new(TEST_SHARED_SECRET);
+    output_store
+        .add_stream_config(build_stream(1, Direction::Output, SLAVE_MAC, 1_000_000))
+        .unwrap();
+
+    let output_header = L2Header::new(1, 1, StatusCode::NoError as u8);
+    let payload = [0x11, 0x22];
+    let (sequence_number_a, _) = output_store
+        .generate_stream_tag(&output_header, &payload)
+        .expect("first tag should be generated");
+    let (sequence_number_b, _) = output_store
+        .generate_stream_tag(&output_header, &payload)
+        .expect("second tag should be generated");
+    assert_eq!(sequence_number_a, 1);
+    assert_eq!(sequence_number_b, 2);
+
+    let input_sender = StreamStore::new(TEST_SHARED_SECRET);
+    let input_receiver = StreamStore::new(TEST_SHARED_SECRET);
+    input_sender
+        .add_stream_config(build_stream(2, Direction::Output, MASTER_MAC, 1_000_000))
+        .unwrap();
+    input_receiver
+        .add_stream_config(build_stream(2, Direction::Input, MASTER_MAC, 1_000_000))
+        .unwrap();
+
+    let input_header = L2Header::new(2, 1, StatusCode::NoError as u8);
+    let (received_sequence_number, received_auth_tag) = input_sender
+        .generate_stream_tag(&input_header, &payload)
+        .expect("sender should generate tag");
+    assert!(
+        input_receiver
+            .validate_stream_tag(
+                &input_header,
+                &payload,
+                received_sequence_number,
+                &received_auth_tag,
+            )
+            .expect("validation should succeed")
+    );
+}
+
+#[test]
+fn test_replay_protection_isolated_per_stream() {
+    let sender_store = StreamStore::new(TEST_SHARED_SECRET);
+    let receiver_store = StreamStore::new(TEST_SHARED_SECRET);
+
+    sender_store
+        .add_stream_config(build_stream(10, Direction::Output, SLAVE_MAC, 1_000_000))
+        .unwrap();
+    sender_store
+        .add_stream_config(build_stream(11, Direction::Output, SLAVE_MAC, 1_000_000))
+        .unwrap();
+    receiver_store
+        .add_stream_config(build_stream(10, Direction::Input, MASTER_MAC, 1_000_000))
+        .unwrap();
+    receiver_store
+        .add_stream_config(build_stream(11, Direction::Input, MASTER_MAC, 1_000_000))
+        .unwrap();
+
+    let payload_stream_a = [0xAA, 0x01];
+    let payload_stream_b = [0xBB, 0x02];
+    let header_stream_a = L2Header::new(10, 1, StatusCode::NoError as u8);
+    let header_stream_b = L2Header::new(11, 1, StatusCode::NoError as u8);
+
+    let (sequence_number_stream_a, auth_tag_stream_a) = sender_store
+        .generate_stream_tag(&header_stream_a, &payload_stream_a)
+        .expect("stream A tag should be generated");
+    let (sequence_number_stream_b, auth_tag_stream_b) = sender_store
+        .generate_stream_tag(&header_stream_b, &payload_stream_b)
+        .expect("stream B tag should be generated");
+
+    assert!(
+        receiver_store
+            .validate_stream_tag(
+                &header_stream_a,
+                &payload_stream_a,
+                sequence_number_stream_a,
+                &auth_tag_stream_a,
+            )
+            .expect("stream A first frame should validate")
+    );
+    assert!(
+        !receiver_store
+            .validate_stream_tag(
+                &header_stream_a,
+                &payload_stream_a,
+                sequence_number_stream_a,
+                &auth_tag_stream_a,
+            )
+            .expect("stream A replay should be rejected")
+    );
+    assert!(
+        receiver_store
+            .validate_stream_tag(
+                &header_stream_b,
+                &payload_stream_b,
+                sequence_number_stream_b,
+                &auth_tag_stream_b,
+            )
+            .expect("stream B should still validate after stream A replay")
+    );
 }

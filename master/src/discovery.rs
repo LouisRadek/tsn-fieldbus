@@ -22,8 +22,11 @@
 //! For concurrent access, wrap it in appropriate synchronization primitives.
 
 use common::discovery_types::{
-    DiscoveredDevice, ETHERTYPE_SDCP, IpReport, SDCP_HEADER_SIZE, SdcpHeader, SdcpOpCode, Tlv,
+    DiscoveredDevice, ETHERTYPE_SDCP, IpReport, SdcpHeader, SdcpOpCode, Tlv, append_sdcp_footer,
+    parse_sdcp_payload,
 };
+use common::security::auth_footer::SecurityFooter;
+use common::security::discovery_auth::DiscoveryAuthHandler;
 use common::slave_api::{DeviceState, StatusCode};
 use common::state_machine::DeviceStateManager;
 use log::{debug, error, info, warn};
@@ -31,7 +34,6 @@ use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInt
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
-use std::cmp;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
@@ -39,9 +41,6 @@ use std::time::{Duration, Instant};
 const BROADCAST_MAC: MacAddr = MacAddr(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2000);
 const DEFAULT_UNICAST_TIMEOUT: Duration = Duration::from_millis(1000);
-
-/// Minimum Ethernet frame size (excluding FCS)
-const MIN_FRAME_SIZE: usize = 60;
 
 /// Master-side SDCP discovery controller
 ///
@@ -54,6 +53,7 @@ pub struct DiscoveryMaster {
     receiver: Box<dyn DataLinkReceiver>,
     discovered_devices: HashMap<MacAddr, DiscoveredDevice>,
     transaction_counter: AtomicU16,
+    discovery_auth_handler: DiscoveryAuthHandler,
 }
 
 impl DiscoveryMaster {
@@ -69,6 +69,7 @@ impl DiscoveryMaster {
     pub fn new(
         interface_name: &str,
         device_state_manager: DeviceStateManager,
+        shared_secret: [u8; 32],
     ) -> Result<Self, StatusCode> {
         let interfaces = datalink::interfaces();
         let interface = interfaces
@@ -93,6 +94,9 @@ impl DiscoveryMaster {
             }
         };
 
+        let discovery_auth_handler = DiscoveryAuthHandler::new(shared_secret);
+        discovery_auth_handler.add_new_device(BROADCAST_MAC);
+
         Ok(Self {
             interface,
             device_state_manager,
@@ -100,6 +104,7 @@ impl DiscoveryMaster {
             receiver,
             discovered_devices: HashMap::new(),
             transaction_counter: AtomicU16::new(1),
+            discovery_auth_handler,
         })
     }
 
@@ -114,7 +119,9 @@ impl DiscoveryMaster {
         device_state_manager: DeviceStateManager,
         transmitter: Box<dyn DataLinkSender>,
         receiver: Box<dyn DataLinkReceiver>,
+        shared_secret: [u8; 32],
     ) -> Self {
+        let discovery_auth_handler = DiscoveryAuthHandler::new(shared_secret);
         Self {
             interface,
             device_state_manager,
@@ -122,6 +129,7 @@ impl DiscoveryMaster {
             receiver,
             discovered_devices: HashMap::new(),
             transaction_counter: AtomicU16::new(1),
+            discovery_auth_handler,
         }
     }
 
@@ -188,7 +196,11 @@ impl DiscoveryMaster {
         while start.elapsed() < timeout {
             match self.receive_raw_frame_nonblocking() {
                 Some(frame_data) => {
-                    if let Some(device) = process_discover_frame(&frame_data, transaction_id) {
+                    if let Some(device) = process_discover_frame(
+                        &frame_data,
+                        transaction_id,
+                        &self.discovery_auth_handler,
+                    ) {
                         let mac = device.mac_address;
                         let is_new = !self.discovered_devices.contains_key(&mac);
                         self.discovered_devices.insert(mac, device.clone());
@@ -261,17 +273,11 @@ impl DiscoveryMaster {
         self.send_frame(&frame)?;
 
         self.wait_for_response(target_mac, SdcpOpCode::GetIpRes, transaction_id, timeout)
-            .and_then(|payload| {
-                if payload.len() > SDCP_HEADER_SIZE as usize {
-                    let tlv_data = &payload[SDCP_HEADER_SIZE as usize..];
-                    Tlv::read_from(tlv_data)
-                        .ok()
-                        .and_then(|tlv| tlv.parse_ip_report())
-                        .ok_or(StatusCode::ErrInvalidResponse)
-                } else {
-                    error!("No data in the payload");
-                    Err(StatusCode::ErrInvalidResponse)
-                }
+            .and_then(|tlv_payload| {
+                Tlv::read_from(&tlv_payload)
+                    .ok()
+                    .and_then(|tlv| tlv.parse_ip_report())
+                    .ok_or(StatusCode::ErrInvalidResponse)
             })
     }
 
@@ -339,20 +345,17 @@ impl DiscoveryMaster {
         self.send_frame(&frame)?;
 
         self.wait_for_response(target_mac, SdcpOpCode::SetIpRes, transaction_id, timeout)
-            .and_then(|payload| {
-                if payload.len() > SDCP_HEADER_SIZE as usize {
-                    let tlv_data = &payload[SDCP_HEADER_SIZE as usize..];
-                    if let Ok(tlv) = Tlv::read_from(tlv_data)
-                        && let Some(status) = tlv.parse_status_report()
-                    {
-                        return if status == StatusCode::NoError {
-                            info!("IP configuration successfully applied to {target_mac}");
-                            Ok(())
-                        } else {
-                            warn!("Device {target_mac} rejected IP config: {status:?}");
-                            Err(StatusCode::ErrHardwareAccess)
-                        };
-                    }
+            .and_then(|tlv_payload| {
+                if let Ok(tlv) = Tlv::read_from(&tlv_payload)
+                    && let Some(status) = tlv.parse_status_report()
+                {
+                    return if status == StatusCode::NoError {
+                        info!("IP configuration successfully applied to {target_mac}");
+                        Ok(())
+                    } else {
+                        warn!("Device {target_mac} rejected IP config: {status:?}");
+                        Err(StatusCode::ErrHardwareAccess)
+                    };
                 }
                 error!("No data in the response");
                 Err(StatusCode::ErrInvalidResponse)
@@ -364,7 +367,7 @@ impl DiscoveryMaster {
     /// Constructs a complete Ethernet frame with SDCP header and optional TLV payload.
     /// Ensures minimum frame size by padding if necessary.
     fn build_request_frame(
-        &self,
+        &mut self,
         destination: MacAddr,
         op_code: SdcpOpCode,
         transaction_id: u16,
@@ -373,8 +376,7 @@ impl DiscoveryMaster {
         let tlv_size = payload_tlv
             .as_ref()
             .map_or(0, |tlv| 2 + tlv.length as usize);
-        let required_size = 14 + SDCP_HEADER_SIZE as usize + tlv_size;
-        let buffer_size = cmp::max(required_size, MIN_FRAME_SIZE);
+        let buffer_size = 14 + 5 + tlv_size + 40;
 
         let mut buffer = vec![0u8; buffer_size];
 
@@ -382,22 +384,41 @@ impl DiscoveryMaster {
             MutableEthernetPacket::new(&mut buffer).ok_or(StatusCode::ErrOsFailure)?;
 
         eth_packet.set_destination(destination);
-        eth_packet.set_source(self.interface.mac.ok_or(StatusCode::ErrSocketChannel)?);
+        let source_mac = self.interface.mac.ok_or(StatusCode::ErrSocketChannel)?;
+        eth_packet.set_source(source_mac);
         eth_packet.set_ethertype(ethernet::EtherType(ETHERTYPE_SDCP));
 
-        let mut payload = Vec::with_capacity(SDCP_HEADER_SIZE as usize + tlv_size);
+        let mut payload = Vec::with_capacity(5 + tlv_size + 40);
         let header = SdcpHeader::new(op_code, transaction_id);
         header.write_to(&mut payload).map_err(|e| {
             error!("Could not write header into payload buffer: {e}");
             StatusCode::ErrOsFailure
         })?;
 
+        let mut tlv_payload = Vec::with_capacity(tlv_size);
         if let Some(tlv) = payload_tlv {
-            tlv.write_to(&mut payload).map_err(|e| {
+            tlv.write_to(&mut tlv_payload).map_err(|e| {
                 error!("Could not write tlv into payload buffer: {e}");
                 StatusCode::ErrOsFailure
             })?;
+            payload.extend_from_slice(&tlv_payload);
         }
+
+        if !self.discovery_auth_handler.has_device(source_mac) {
+            self.discovery_auth_handler.add_new_device(source_mac);
+        }
+
+        let (sequence_number, auth_tag) = self
+            .discovery_auth_handler
+            .create_auth_tag(source_mac, &header, &tlv_payload)
+            .ok_or(StatusCode::ErrAuthFailed)?;
+        append_sdcp_footer(
+            &mut payload,
+            &SecurityFooter {
+                sequence_number,
+                auth_tag,
+            },
+        );
 
         eth_packet.set_payload(&payload);
 
@@ -442,6 +463,10 @@ impl DiscoveryMaster {
         expected_transaction_id: u16,
         timeout: Duration,
     ) -> Result<Vec<u8>, StatusCode> {
+        if !self.discovery_auth_handler.has_device(expected_source) {
+            self.discovery_auth_handler.add_new_device(expected_source);
+        }
+
         let start = Instant::now();
 
         while start.elapsed() < timeout {
@@ -466,16 +491,25 @@ impl DiscoveryMaster {
                         }
 
                         let payload = ethernet_frame.payload();
-                        if let Ok(header) = SdcpHeader::read_from(payload)
-                            && header.op_code == expected_opcode
-                            && header.transaction_id == expected_transaction_id
+                        if let Ok(parsed_payload) = parse_sdcp_payload(payload)
+                            && parsed_payload.header.op_code == expected_opcode
+                            && parsed_payload.header.transaction_id == expected_transaction_id
+                            && self.discovery_auth_handler.validate_auth_tag(
+                                expected_source,
+                                &parsed_payload.header,
+                                parsed_payload.tlv_payload,
+                                parsed_payload.sequence_number,
+                                &parsed_payload.auth_tag,
+                            )
                         {
                             debug!(
                                 "Received expected response from {expected_source}: {expected_opcode:?}"
                             );
-                            return Ok(payload.to_vec());
+                            return Ok(parsed_payload.tlv_payload.to_vec());
                         } else {
-                            debug!("Frame header did not match expected opcode/transaction_id");
+                            debug!(
+                                "Frame header did not match expected opcode/transaction_id or the auth tag is invalid."
+                            );
                         }
                     } else {
                         warn!("Failed to parse Ethernet frame");
@@ -500,6 +534,7 @@ impl DiscoveryMaster {
 fn process_discover_frame(
     frame_data: &[u8],
     expected_transaction_id: u16,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) -> Option<DiscoveredDevice> {
     let eth_packet = EthernetPacket::new(frame_data)?;
 
@@ -508,22 +543,56 @@ fn process_discover_frame(
     }
 
     let payload = eth_packet.payload();
-    let header = SdcpHeader::read_from(payload).ok()?;
+    let parsed_payload = parse_sdcp_payload(payload).ok()?;
+    let header = parsed_payload.header;
 
     if header.op_code != SdcpOpCode::DiscoverRes || header.transaction_id != expected_transaction_id
     {
         return None;
     }
 
-    let tlv_data = &payload[SDCP_HEADER_SIZE as usize..];
+    let source_mac = eth_packet.get_source();
+    let auth_valid = if discovery_auth_handler.has_device(source_mac) {
+        discovery_auth_handler.validate_auth_tag(
+            source_mac,
+            &header,
+            parsed_payload.tlv_payload,
+            parsed_payload.sequence_number,
+            &parsed_payload.auth_tag,
+        )
+    } else {
+        let valid = discovery_auth_handler.validate_discovery_response(
+            &header,
+            parsed_payload.tlv_payload,
+            parsed_payload.sequence_number,
+            &parsed_payload.auth_tag,
+        );
+
+        if valid {
+            discovery_auth_handler.add_new_device(source_mac);
+            discovery_auth_handler.set_last_valid_received_sequence_number(
+                source_mac,
+                parsed_payload.sequence_number,
+            );
+        }
+        valid
+    };
+
+    if !auth_valid {
+        return None;
+    }
+
+    let tlv_data = parsed_payload.tlv_payload;
     let tlv = Tlv::read_from(tlv_data).ok()?;
     let device_info = tlv.parse_device_info()?;
 
-    Some(DiscoveredDevice::new(eth_packet.get_source(), device_info))
+    Some(DiscoveredDevice::new(source_mac, device_info))
 }
 
 #[cfg(test)]
 mod tests {
+    use common::security::auth_footer::SecurityFooter;
+    use common::security::crypto::calculate_hmac;
     use common::test_mocks::{
         MockDataLinkReceiver, MockDataLinkSender, TEST_MAC, create_mock_interface,
     };
@@ -540,6 +609,7 @@ mod tests {
     const DEFAULT_GATEWAY: [u8; 4] = [192, 168, 1, 1];
     const TEST_TIMEOUT: Duration = Duration::from_millis(100);
     const SHORT_TIMEOUT: Duration = Duration::from_millis(50);
+    const TEST_SHARED_SECRET: [u8; 32] = [0x5A; 32];
 
     fn build_sdcp_frame(
         source_mac: MacAddr,
@@ -548,19 +618,39 @@ mod tests {
         op_code: SdcpOpCode,
         tlv: Option<Tlv>,
     ) -> Vec<u8> {
-        let mut frame = vec![0u8; 64];
-
-        frame[0..6].copy_from_slice(&dest_mac.octets());
-        frame[6..12].copy_from_slice(&source_mac.octets());
-        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
-
         let mut sdcp_payload = Vec::new();
         let header = SdcpHeader::new(op_code, transaction_id);
         header.write_to(&mut sdcp_payload).unwrap();
 
+        let mut tlv_payload = Vec::new();
         if let Some(tlv) = tlv {
-            tlv.write_to(&mut sdcp_payload).unwrap();
+            tlv.write_to(&mut tlv_payload).unwrap();
+            sdcp_payload.extend_from_slice(&tlv_payload);
         }
+
+        let header_bytes = [
+            header.version,
+            header.op_code as u8,
+            (header.transaction_id >> 8) as u8,
+            header.transaction_id as u8,
+            header.flags,
+        ];
+        let sequence_number = 1u64;
+        let sequence_bytes = sequence_number.to_be_bytes();
+        let auth_tag = calculate_hmac(
+            &TEST_SHARED_SECRET,
+            &[&header_bytes, &tlv_payload, &sequence_bytes],
+        );
+        SecurityFooter {
+            sequence_number,
+            auth_tag,
+        }
+        .write_to(&mut sdcp_payload);
+
+        let mut frame = vec![0u8; 14 + sdcp_payload.len()];
+        frame[0..6].copy_from_slice(&dest_mac.octets());
+        frame[6..12].copy_from_slice(&source_mac.octets());
+        frame[12..14].copy_from_slice(&ETHERTYPE_SDCP.to_be_bytes());
 
         frame[14..14 + sdcp_payload.len()].copy_from_slice(&sdcp_payload);
         frame
@@ -630,6 +720,7 @@ mod tests {
             device_state_manager,
             Box::new(sender),
             Box::new(receiver),
+            TEST_SHARED_SECRET,
         )
     }
 
@@ -649,6 +740,7 @@ mod tests {
             device_state_manager,
             Box::new(sender),
             Box::new(receiver),
+            TEST_SHARED_SECRET,
         )
     }
 
@@ -675,7 +767,9 @@ mod tests {
     #[test]
     fn test_process_discover_frame_valid() {
         let frame = default_discovery_response();
-        let device = process_discover_frame(&frame, 1).expect("Should parse valid frame");
+        let discovery_auth_handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+        let device = process_discover_frame(&frame, 1, &discovery_auth_handler)
+            .expect("Should parse valid frame");
 
         assert_eq!(device.mac_address, SLAVE_MAC);
         assert_eq!(device.vendor_id, VENDOR_ID);
@@ -693,13 +787,15 @@ mod tests {
             DEVICE_ID,
             SERIAL_NUMBER,
         );
-        assert!(process_discover_frame(&frame, 1).is_none());
+        let discovery_auth_handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+        assert!(process_discover_frame(&frame, 1, &discovery_auth_handler).is_none());
     }
 
     #[test]
     fn test_process_discover_frame_wrong_opcode() {
         let frame = build_sdcp_frame(SLAVE_MAC, TEST_MAC, 1, SdcpOpCode::DiscoverReq, None);
-        assert!(process_discover_frame(&frame, 1).is_none());
+        let discovery_auth_handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+        assert!(process_discover_frame(&frame, 1, &discovery_auth_handler).is_none());
     }
 
     #[test]
@@ -709,7 +805,8 @@ mod tests {
         frame[6..12].copy_from_slice(&TEST_MAC.octets());
         frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
 
-        assert!(process_discover_frame(&frame, 1).is_none());
+        let discovery_auth_handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+        assert!(process_discover_frame(&frame, 1, &discovery_auth_handler).is_none());
     }
 
     #[test]

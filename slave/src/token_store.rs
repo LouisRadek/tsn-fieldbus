@@ -19,6 +19,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use common::security::shared_secret::load_shared_secret_from_env;
 use common::slave_api::StatusCode;
 use log::warn;
 use rand::RngCore;
@@ -48,24 +49,6 @@ impl PreSharedKey {
 impl std::fmt::Debug for PreSharedKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PreSharedKey(***HIDDEN***)")
-    }
-}
-
-/// Parse a textual representation of the shared key.
-///
-/// Currently accepts a hex string, optionally prefixed with `0x`.
-fn parse_shared_key(shared_key_raw: String) -> Result<PreSharedKey, String> {
-    let shared_key_raw = shared_key_raw.trim();
-
-    let shared_key_raw_without_prefix = shared_key_raw.strip_prefix("0x").unwrap_or(shared_key_raw);
-    if let Ok(vec) = hex::decode(shared_key_raw_without_prefix) {
-        if let Some(shared_key) = PreSharedKey::from_bytes(&vec) {
-            Ok(shared_key)
-        } else {
-            Err("Failed to parse shared key with hex encoding!".into())
-        }
-    } else {
-        Err("Failed to decode shared slave key with hex encoding!".into())
     }
 }
 
@@ -105,11 +88,8 @@ impl TokenStore {
     /// The environment value is expected to be a 64-character hex string (32 bytes),
     /// e.g. produced by `openssl rand -hex 32`.
     pub fn from_env() -> Result<Self, String> {
-        let shared_key_raw =
-            std::env::var("SHARED_SLAVE_KEY").map_err(|e| format!("Missing env var: {e}"))?;
-        let shared_key = parse_shared_key(shared_key_raw)
-            .map_err(|e| format!("Invalid SHARED_SLAVE_KEY: {e}"))?;
-        Ok(TokenStore::new(shared_key))
+        let shared_key = load_shared_secret_from_env()?;
+        Ok(TokenStore::new(PreSharedKey(shared_key)))
     }
 
     fn generate_token(&self) -> String {

@@ -11,8 +11,12 @@
 //! - `GetIpReq/Res`: Report current IP configuration and source
 //! - `SetIpReq/Res`: Set new IP configuration
 
-use common::discovery_types::{ETHERTYPE_SDCP, SDCP_HEADER_SIZE, SdcpHeader, SdcpOpCode, Tlv};
+use common::discovery_types::{
+    ETHERTYPE_SDCP, SdcpHeader, SdcpOpCode, Tlv, append_sdcp_footer, parse_sdcp_payload,
+};
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
+use common::security::auth_footer::SecurityFooter;
+use common::security::discovery_auth::DiscoveryAuthHandler;
 use common::slave_api::{DeviceInfo, DeviceState, IpSource, StatusCode};
 use common::state_machine::DeviceStateManager;
 use log::{error, info, warn};
@@ -21,8 +25,8 @@ use pnet::packet::Packet;
 use pnet::packet::ethernet::{self, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
 use std::sync::Arc;
+use std::thread;
 use std::thread::JoinHandle;
-use std::{cmp, thread};
 
 /// Starts a discovery listener that responds to SDCP discovery requests.
 ///
@@ -37,6 +41,7 @@ pub fn start_discovery_listener(
     device_state_manager: DeviceStateManager,
     device_info_access: Arc<dyn DeviceInfoAccess>,
     network_interface_access: Arc<dyn NetworkInterfaceAccess>,
+    discovery_auth_handler: DiscoveryAuthHandler,
 ) -> Result<JoinHandle<()>, StatusCode> {
     let interfaces = datalink::interfaces();
 
@@ -90,23 +95,27 @@ pub fn start_discovery_listener(
                     }
 
                     let payload = ethernet_frame.payload();
-                    match SdcpHeader::read_from(payload) {
-                        Ok(header) => {
-                            handle_packet(
-                                &header,
-                                payload,
-                                &ethernet_frame,
-                                &mut *transmitter,
-                                &interface,
-                                device_state_manager.clone(),
-                                &device_info_access,
-                                &network_interface_access,
-                            );
+                    let parsed = match parse_sdcp_payload(payload) {
+                        Ok(parsed) => parsed,
+                        Err(code) => {
+                            warn!("Failed to parse SDCP payload: {code:?}");
+                            continue;
                         }
-                        Err(e) => {
-                            warn!("Failed to parse SDCP header: {e:?}");
-                        }
-                    }
+                    };
+
+                    handle_packet(
+                        &parsed.header,
+                        parsed.tlv_payload,
+                        parsed.sequence_number,
+                        &parsed.auth_tag,
+                        &ethernet_frame,
+                        &mut *transmitter,
+                        &interface,
+                        device_state_manager.clone(),
+                        &device_info_access,
+                        &network_interface_access,
+                        &discovery_auth_handler,
+                    );
                 }
                 Err(e) => warn!("Failed to read packet: {e}"),
             }
@@ -134,14 +143,32 @@ pub fn start_discovery_listener(
 #[allow(clippy::too_many_arguments)]
 pub fn handle_packet(
     header: &SdcpHeader,
-    raw_payload: &[u8],
+    tlv_payload: &[u8],
+    sequence_number: u64,
+    auth_tag: &[u8; 32],
     ethernet_frame: &EthernetPacket,
     transmitter: &mut dyn datalink::DataLinkSender,
     interface: &NetworkInterface,
     device_state_manager: DeviceStateManager,
     device_info_access: &Arc<dyn DeviceInfoAccess>,
     network_interface_access: &Arc<dyn NetworkInterfaceAccess>,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) {
+    let source_mac = ethernet_frame.get_source();
+    if !discovery_auth_handler.validate_auth_tag(
+        source_mac,
+        header,
+        tlv_payload,
+        sequence_number,
+        auth_tag,
+    ) {
+        warn!(
+            "Rejected SDCP packet from {} due to authentication failure",
+            source_mac
+        );
+        return;
+    }
+
     match header.op_code {
         SdcpOpCode::DiscoverReq => {
             handle_discovery_request(
@@ -150,18 +177,20 @@ pub fn handle_packet(
                 transmitter,
                 interface,
                 device_info_access,
+                discovery_auth_handler,
             );
         }
         SdcpOpCode::SetIpReq => {
             handle_set_ip_request(
                 header,
-                raw_payload,
+                tlv_payload,
                 ethernet_frame,
                 transmitter,
                 interface,
                 device_state_manager,
                 device_info_access,
                 network_interface_access,
+                discovery_auth_handler,
             );
         }
         SdcpOpCode::GetIpReq => {
@@ -171,6 +200,7 @@ pub fn handle_packet(
                 transmitter,
                 interface,
                 device_info_access,
+                discovery_auth_handler,
             );
         }
         _ => {}
@@ -199,6 +229,7 @@ fn send_status_response(
     op_code: SdcpOpCode,
     transaction_id: u16,
     code: StatusCode,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) {
     let status_tlv = Tlv::status_report(code);
     send_response(
@@ -208,6 +239,7 @@ fn send_status_response(
         op_code,
         transaction_id,
         status_tlv,
+        discovery_auth_handler,
     );
 }
 
@@ -217,6 +249,7 @@ fn handle_get_ip_request(
     transmitter: &mut dyn DataLinkSender,
     interface: &NetworkInterface,
     device_info_access: &Arc<dyn DeviceInfoAccess + 'static>,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) {
     info!(
         "Received Get IP request from: {}",
@@ -234,6 +267,7 @@ fn handle_get_ip_request(
                 SdcpOpCode::GetIpRes,
                 header.transaction_id,
                 code,
+                discovery_auth_handler,
             );
             return;
         }
@@ -265,22 +299,24 @@ fn handle_get_ip_request(
         SdcpOpCode::GetIpRes,
         header.transaction_id,
         tlv,
+        discovery_auth_handler,
     );
 }
 
 #[allow(clippy::too_many_arguments)]
 fn handle_set_ip_request(
     header: &SdcpHeader,
-    raw_payload: &[u8],
+    tlv_payload: &[u8],
     ethernet_frame: &EthernetPacket<'_>,
     transmitter: &mut dyn DataLinkSender,
     interface: &NetworkInterface,
     device_state_manager: DeviceStateManager,
     device_info_access: &Arc<dyn DeviceInfoAccess>,
     network_interface_access: &Arc<dyn NetworkInterfaceAccess>,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) {
-    if raw_payload.len() > 5 {
-        match Tlv::read_from(&raw_payload[5..]) {
+    if !tlv_payload.is_empty() {
+        match Tlv::read_from(tlv_payload) {
             Ok(tlv) => match tlv.parse_ip_config() {
                 Some(ip_config) => {
                     info!("Received IP Config: {ip_config:?}");
@@ -302,6 +338,7 @@ fn handle_set_ip_request(
                                         SdcpOpCode::SetIpRes,
                                         header.transaction_id,
                                         code,
+                                        discovery_auth_handler,
                                     );
                                     return;
                                 }
@@ -320,6 +357,7 @@ fn handle_set_ip_request(
                                         SdcpOpCode::SetIpRes,
                                         header.transaction_id,
                                         code,
+                                        discovery_auth_handler,
                                     );
                                     return;
                                 }
@@ -331,6 +369,7 @@ fn handle_set_ip_request(
                                 SdcpOpCode::SetIpRes,
                                 header.transaction_id,
                                 StatusCode::NoError,
+                                discovery_auth_handler,
                             );
 
                             let _ = device_state_manager
@@ -346,6 +385,7 @@ fn handle_set_ip_request(
                                 SdcpOpCode::SetIpRes,
                                 header.transaction_id,
                                 StatusCode::ErrHardwareAccess,
+                                discovery_auth_handler,
                             );
                         }
                     }
@@ -367,6 +407,7 @@ fn handle_discovery_request(
     transmitter: &mut dyn DataLinkSender,
     interface: &NetworkInterface,
     device_info_access: &Arc<dyn DeviceInfoAccess>,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) {
     info!("Received DISCOVER_REQ from {}", ethernet_frame.get_source());
 
@@ -386,6 +427,7 @@ fn handle_discovery_request(
         SdcpOpCode::DiscoverRes,
         header.transaction_id,
         tlv,
+        discovery_auth_handler,
     );
 }
 
@@ -396,10 +438,10 @@ fn send_response(
     op_code: SdcpOpCode,
     transaction_id: u16,
     payload_tlv: Tlv,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) {
-    // Ethernet Header (14 bytes), SDCP Header Size, TLV Lenght, 2 for the type and lenght field of the tlv
-    let required_buffer_size = 14 + SDCP_HEADER_SIZE + payload_tlv.length + 2;
-    let mut buffer = vec![0u8; cmp::max(required_buffer_size as usize, 60)];
+    let required_buffer_size = 14 + 5 + payload_tlv.length as usize + 2 + 40;
+    let mut buffer = vec![0u8; required_buffer_size];
 
     let mut eth = MutableEthernetPacket::new(&mut buffer).unwrap();
     eth.set_destination(target_mac);
@@ -409,7 +451,27 @@ fn send_response(
     let mut payload_buffer = Vec::new();
     let header = SdcpHeader::new(op_code, transaction_id);
     header.write_to(&mut payload_buffer).unwrap();
-    payload_tlv.write_to(&mut payload_buffer).unwrap();
+    let mut tlv_payload = Vec::with_capacity(payload_tlv.length as usize + 2);
+    payload_tlv.write_to(&mut tlv_payload).unwrap();
+    payload_buffer.extend_from_slice(&tlv_payload);
+
+    let source_mac = interface
+        .mac
+        .expect("interface mac must be available for SDCP response authentication");
+
+    if !discovery_auth_handler.has_device(source_mac) {
+        discovery_auth_handler.add_new_device(source_mac);
+    }
+    let (sequence_number, auth_tag) = discovery_auth_handler
+        .create_auth_tag(source_mac, &header, &tlv_payload)
+        .expect("security context must exist for SDCP response source");
+    append_sdcp_footer(
+        &mut payload_buffer,
+        &SecurityFooter {
+            sequence_number,
+            auth_tag,
+        },
+    );
 
     eth.set_payload(&payload_buffer);
 
@@ -422,6 +484,7 @@ fn send_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::security::crypto::calculate_hmac;
     use common::test_mocks::{MockDataLinkSender, MockDeviceInfo, MockNetworkInterface, TEST_MAC};
     use pnet::util::MacAddr;
     use std::sync::Arc;
@@ -431,49 +494,75 @@ mod tests {
     const TEST_IP: [u8; 4] = [10, 0, 0, 50];
     const TEST_NETMASK: [u8; 4] = [255, 255, 255, 0];
     const TEST_GATEWAY: [u8; 4] = [10, 0, 0, 1];
+    const TEST_SHARED_SECRET: [u8; 32] = [0x5A; 32];
 
     struct TestContext {
         sender: MockDataLinkSender,
         device_info: Arc<dyn DeviceInfoAccess>,
         network_access: Arc<dyn NetworkInterfaceAccess>,
         interface: NetworkInterface,
+        discovery_auth_handler: DiscoveryAuthHandler,
     }
 
     impl TestContext {
         fn new() -> Self {
+            let discovery_auth_handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+            discovery_auth_handler.add_new_device(MASTER_MAC);
             Self {
                 sender: MockDataLinkSender::new(),
                 device_info: Arc::new(MockDeviceInfo::new(TEST_MAC)),
                 network_access: Arc::new(MockNetworkInterface::new()),
                 interface: pnet::datalink::interfaces()[0].clone(),
+                discovery_auth_handler,
             }
         }
 
         fn with_failing_network() -> Self {
+            let discovery_auth_handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+            discovery_auth_handler.add_new_device(MASTER_MAC);
             Self {
                 sender: MockDataLinkSender::new(),
                 device_info: Arc::new(MockDeviceInfo::new(TEST_MAC)),
                 network_access: Arc::new(MockNetworkInterface::failing()),
                 interface: pnet::datalink::interfaces()[0].clone(),
+                discovery_auth_handler,
             }
         }
 
         fn handle_request(&mut self, op_code: SdcpOpCode, transaction_id: u16, tlv: Option<Tlv>) {
             let (payload, header) = build_sdcp_payload(op_code, transaction_id, tlv);
+            let tlv_payload = &payload[common::discovery_types::SDCP_HEADER_SIZE as usize..];
             let eth_frame = create_ethernet_frame(MASTER_MAC, BROADCAST_MAC);
 
             let device_state_manager = DeviceStateManager::new();
             let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
 
+            let sequence_number = 1u64;
+            let sequence_bytes = sequence_number.to_be_bytes();
+            let header_bytes = [
+                header.version,
+                header.op_code as u8,
+                (header.transaction_id >> 8) as u8,
+                header.transaction_id as u8,
+                header.flags,
+            ];
+            let auth_tag = calculate_hmac(
+                &TEST_SHARED_SECRET,
+                &[&header_bytes, tlv_payload, &sequence_bytes],
+            );
+
             handle_packet(
                 &header,
-                &payload,
+                tlv_payload,
+                sequence_number,
+                &auth_tag,
                 &EthernetPacket::new(&eth_frame).unwrap(),
                 &mut self.sender,
                 &self.interface,
                 device_state_manager,
                 &self.device_info,
                 &self.network_access,
+                &self.discovery_auth_handler,
             );
         }
 
@@ -495,8 +584,6 @@ mod tests {
 
         if let Some(tlv) = tlv {
             tlv.write_to(&mut payload).unwrap();
-        } else {
-            payload.extend_from_slice(&[0u8; 100]);
         }
 
         let header_read = SdcpHeader::read_from(&payload).unwrap();
@@ -575,6 +662,7 @@ mod tests {
             SdcpOpCode::DiscoverRes,
             0x0001,
             tlv,
+            &DiscoveryAuthHandler::new(TEST_SHARED_SECRET),
         );
 
         let sent = sender.get_sent_packets();
@@ -603,7 +691,15 @@ mod tests {
             let mut sender = MockDataLinkSender::new();
             let tlv = Tlv::status_report(StatusCode::NoError);
 
-            send_response(&mut sender, interface, target_mac, *opcode, 0x0001, tlv);
+            send_response(
+                &mut sender,
+                interface,
+                target_mac,
+                *opcode,
+                0x0001,
+                tlv,
+                &DiscoveryAuthHandler::new(TEST_SHARED_SECRET),
+            );
 
             assert!(
                 !sender.get_sent_packets().is_empty(),

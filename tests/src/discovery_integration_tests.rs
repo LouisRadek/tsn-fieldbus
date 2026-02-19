@@ -18,6 +18,8 @@
 use crate::mock_network::{FrameQueue, MockNetwork, MockReceiver, MockSender};
 use common::discovery_types::{ETHERTYPE_SDCP, SdcpHeader};
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
+use common::security::auth_footer::split_payload_and_footer;
+use common::security::discovery_auth::DiscoveryAuthHandler;
 use common::slave_api::{DeviceState, IpSource, StatusCode};
 use common::state_machine::DeviceStateManager;
 use common::test_mocks::{MockDeviceInfo, MockNetworkInterface, create_mock_interface};
@@ -42,6 +44,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(100);
 const TEST_IP: [u8; 4] = [10, 0, 0, 50];
 const TEST_NETMASK: [u8; 4] = [255, 255, 255, 0];
 const TEST_GATEWAY: [u8; 4] = [10, 0, 0, 1];
+const TEST_SHARED_SECRET: [u8; 32] = [0x5A; 32];
 
 /// Encapsulates all components needed for a single-slave integration test.
 struct TestFixture {
@@ -86,7 +89,13 @@ impl TestFixture {
         let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
         let tx = MockSender::new(tx_queue);
         let rx = MockReceiver::new(rx_queue);
-        DiscoveryMaster::new_with_mocks(interface, device_state_manager, Box::new(tx), Box::new(rx))
+        DiscoveryMaster::new_with_mocks(
+            interface,
+            device_state_manager,
+            Box::new(tx),
+            Box::new(rx),
+            TEST_SHARED_SECRET,
+        )
     }
 }
 
@@ -96,6 +105,7 @@ struct SlaveContext {
     network_interface: Arc<MockNetworkInterface>,
     tx_queue: FrameQueue,
     rx_queue: FrameQueue,
+    discovery_auth_handler: DiscoveryAuthHandler,
 }
 
 impl SlaveContext {
@@ -106,6 +116,11 @@ impl SlaveContext {
             network_interface: Arc::new(MockNetworkInterface::new()),
             tx_queue,
             rx_queue,
+            discovery_auth_handler: {
+                let handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+                handler.add_new_device(MASTER_MAC);
+                handler
+            },
         }
     }
 
@@ -123,6 +138,11 @@ impl SlaveContext {
             network_interface: Arc::new(MockNetworkInterface::new()),
             tx_queue,
             rx_queue,
+            discovery_auth_handler: {
+                let handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+                handler.add_new_device(MASTER_MAC);
+                handler
+            },
         }
     }
 
@@ -133,6 +153,11 @@ impl SlaveContext {
             network_interface: Arc::new(MockNetworkInterface::failing()),
             tx_queue,
             rx_queue,
+            discovery_auth_handler: {
+                let handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+                handler.add_new_device(MASTER_MAC);
+                handler
+            },
         }
     }
 
@@ -143,6 +168,7 @@ impl SlaveContext {
             Arc::clone(&self.network_interface) as Arc<dyn NetworkInterfaceAccess>;
         let mut tx = MockSender::new(Arc::clone(&self.tx_queue));
         let mut rx = MockReceiver::new(Arc::clone(&self.rx_queue));
+        let discovery_auth_handler = self.discovery_auth_handler.clone();
 
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(10));
@@ -152,6 +178,7 @@ impl SlaveContext {
                 &interface,
                 &device_info,
                 &network_interface,
+                &discovery_auth_handler,
             );
         })
     }
@@ -167,12 +194,19 @@ fn process_single_frame(
     interface: &NetworkInterface,
     device_info: &Arc<dyn DeviceInfoAccess>,
     network_interface: &Arc<dyn NetworkInterfaceAccess>,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) {
     loop {
         match rx.next() {
             Ok(frame_data) => {
-                if try_process_sdcp_frame(frame_data, tx, interface, device_info, network_interface)
-                {
+                if try_process_sdcp_frame(
+                    frame_data,
+                    tx,
+                    interface,
+                    device_info,
+                    network_interface,
+                    discovery_auth_handler,
+                ) {
                     break;
                 }
             }
@@ -189,6 +223,7 @@ fn try_process_sdcp_frame(
     interface: &NetworkInterface,
     device_info: &Arc<dyn DeviceInfoAccess>,
     network_interface: &Arc<dyn NetworkInterfaceAccess>,
+    discovery_auth_handler: &DiscoveryAuthHandler,
 ) -> bool {
     let Some(eth_packet) = EthernetPacket::new(frame_data) else {
         return false;
@@ -199,22 +234,29 @@ fn try_process_sdcp_frame(
     }
 
     let payload = eth_packet.payload();
-    let Ok(header) = SdcpHeader::read_from(payload) else {
+    let Ok((payload_without_footer, footer)) = split_payload_and_footer(payload) else {
         return false;
     };
+    let Ok(header) = SdcpHeader::read_from(payload_without_footer) else {
+        return false;
+    };
+    let tlv_payload = &payload_without_footer[common::discovery_types::SDCP_HEADER_SIZE as usize..];
 
     let device_state_manager = DeviceStateManager::new();
     let _ = device_state_manager.set_target_state(DeviceState::DiscoverySync);
 
     handle_packet(
         &header,
-        payload,
+        tlv_payload,
+        footer.sequence_number,
+        &footer.auth_tag,
         &eth_packet,
         tx,
         interface,
         device_state_manager,
         device_info,
         network_interface,
+        discovery_auth_handler,
     );
 
     true
@@ -372,6 +414,7 @@ struct SlaveInstance {
     device_info: Arc<dyn DeviceInfoAccess>,
     network_interface: Arc<dyn NetworkInterfaceAccess>,
     tx: MockSender,
+    discovery_auth_handler: DiscoveryAuthHandler,
 }
 
 fn create_slave_with_device_info(
@@ -396,6 +439,11 @@ fn create_slave_with_device_info(
         device_info,
         network_interface: Arc::new(MockNetworkInterface::new()),
         tx: MockSender::new(Arc::clone(tx_queue)),
+        discovery_auth_handler: {
+            let handler = DiscoveryAuthHandler::new(TEST_SHARED_SECRET);
+            handler.add_new_device(MASTER_MAC);
+            handler
+        },
     }
 }
 
@@ -417,17 +465,24 @@ fn spawn_multi_slave_handler(
                     && eth_packet.get_ethertype().0 == ETHERTYPE_SDCP
                 {
                     let payload = eth_packet.payload();
-                    if let Ok(header) = SdcpHeader::read_from(payload) {
+                    if let Ok((payload_without_footer, footer)) = split_payload_and_footer(payload)
+                        && let Ok(header) = SdcpHeader::read_from(payload_without_footer)
+                    {
+                        let tlv_payload = &payload_without_footer
+                            [common::discovery_types::SDCP_HEADER_SIZE as usize..];
                         for slave in &mut slaves {
                             handle_packet(
                                 &header,
-                                payload,
+                                tlv_payload,
+                                footer.sequence_number,
+                                &footer.auth_tag,
                                 &eth_packet,
                                 &mut slave.tx,
                                 &slave.interface,
                                 device_state_manager.clone(),
                                 &slave.device_info,
                                 &slave.network_interface,
+                                &slave.discovery_auth_handler,
                             );
                         }
                         break;
