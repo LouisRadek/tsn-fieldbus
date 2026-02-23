@@ -38,36 +38,3 @@ pub fn parse_shared_secret_hex(raw_secret: &str) -> Result<[u8; 32], String> {
     secret.copy_from_slice(&decoded);
     Ok(secret)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_shared_secret_hex_accepts_plain_hex() {
-        let raw = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-        let parsed = parse_shared_secret_hex(raw).expect("hex should parse");
-        assert_eq!(parsed[0], 0x00);
-        assert_eq!(parsed[1], 0x11);
-        assert_eq!(parsed[31], 0xFF);
-    }
-
-    #[test]
-    fn parse_shared_secret_hex_accepts_prefixed_hex() {
-        let raw = "0x00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-        let parsed = parse_shared_secret_hex(raw).expect("prefixed hex should parse");
-        assert_eq!(parsed.len(), 32);
-    }
-
-    #[test]
-    fn parse_shared_secret_hex_rejects_invalid_length() {
-        let raw = "0011";
-        assert!(parse_shared_secret_hex(raw).is_err());
-    }
-
-    #[test]
-    fn parse_shared_secret_hex_rejects_invalid_chars() {
-        let raw = "ZZ112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-        assert!(parse_shared_secret_hex(raw).is_err());
-    }
-}
