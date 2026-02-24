@@ -25,7 +25,7 @@ use common::discovery_types::{
     DiscoveredDevice, ETHERTYPE_SDCP, IpReport, SdcpHeader, SdcpOpCode, Tlv, append_sdcp_footer,
     parse_sdcp_payload,
 };
-use common::security::auth_footer::SecurityFooter;
+use common::security::auth_footer::{SECURITY_FOOTER_SIZE, SecurityFooter};
 use common::security::discovery_auth::DiscoveryAuthHandler;
 use common::slave_api::{DeviceState, StatusCode};
 use common::state_machine::DeviceStateManager;
@@ -376,7 +376,7 @@ impl DiscoveryMaster {
         let tlv_size = payload_tlv
             .as_ref()
             .map_or(0, |tlv| 2 + tlv.length as usize);
-        let buffer_size = 14 + 5 + tlv_size + 40;
+        let buffer_size = 14 + 5 + tlv_size + SECURITY_FOOTER_SIZE;
 
         let mut buffer = vec![0u8; buffer_size];
 
@@ -388,7 +388,7 @@ impl DiscoveryMaster {
         eth_packet.set_source(source_mac);
         eth_packet.set_ethertype(ethernet::EtherType(ETHERTYPE_SDCP));
 
-        let mut payload = Vec::with_capacity(5 + tlv_size + 40);
+        let mut payload = Vec::with_capacity(5 + tlv_size + SECURITY_FOOTER_SIZE);
         let header = SdcpHeader::new(op_code, transaction_id);
         header.write_to(&mut payload).map_err(|e| {
             error!("Could not write header into payload buffer: {e}");

@@ -15,7 +15,7 @@ use common::discovery_types::{
     ETHERTYPE_SDCP, SdcpHeader, SdcpOpCode, Tlv, append_sdcp_footer, parse_sdcp_payload,
 };
 use common::hardware_abstraction::{DeviceInfoAccess, NetworkInterfaceAccess};
-use common::security::auth_footer::SecurityFooter;
+use common::security::auth_footer::{AUTH_TAG_SIZE, SECURITY_FOOTER_SIZE, SecurityFooter};
 use common::security::discovery_auth::DiscoveryAuthHandler;
 use common::slave_api::{DeviceInfo, DeviceState, IpSource, StatusCode};
 use common::state_machine::DeviceStateManager;
@@ -145,7 +145,7 @@ pub fn handle_packet(
     header: &SdcpHeader,
     tlv_payload: &[u8],
     sequence_number: u64,
-    auth_tag: &[u8; 32],
+    auth_tag: &[u8; AUTH_TAG_SIZE],
     ethernet_frame: &EthernetPacket,
     transmitter: &mut dyn datalink::DataLinkSender,
     interface: &NetworkInterface,
@@ -440,7 +440,7 @@ fn send_response(
     payload_tlv: Tlv,
     discovery_auth_handler: &DiscoveryAuthHandler,
 ) {
-    let required_buffer_size = 14 + 5 + payload_tlv.length as usize + 2 + 40;
+    let required_buffer_size = 14 + 5 + payload_tlv.length as usize + 2 + SECURITY_FOOTER_SIZE;
     let mut buffer = vec![0u8; required_buffer_size];
 
     let mut eth = MutableEthernetPacket::new(&mut buffer).unwrap();

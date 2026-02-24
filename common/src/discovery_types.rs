@@ -38,7 +38,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use pnet::util::MacAddr;
 use std::io::{self, Cursor, Read};
 
-use crate::security::auth_footer::{SecurityFooter, split_payload_and_footer};
+use crate::security::auth_footer::{AUTH_TAG_SIZE, SecurityFooter, split_payload_and_footer};
 use crate::slave_api::{IpSource, StatusCode};
 
 pub const ETHERTYPE_SDCP: u16 = 0x88B5;
@@ -416,7 +416,7 @@ pub struct ParsedSdcpPayload<'a> {
     pub header: SdcpHeader,
     pub tlv_payload: &'a [u8],
     pub sequence_number: u64,
-    pub auth_tag: [u8; 32],
+    pub auth_tag: [u8; AUTH_TAG_SIZE],
 }
 
 /// Parse a raw SDCP payload into header, TLV payload, and security footer.
@@ -598,7 +598,7 @@ mod tests {
 
         let footer = SecurityFooter {
             sequence_number: 11,
-            auth_tag: [0xAA; 32],
+            auth_tag: [0xAA; AUTH_TAG_SIZE],
         };
         append_sdcp_footer(&mut payload, &footer);
 
@@ -610,7 +610,7 @@ mod tests {
             TEST_VENDOR_ID
         );
         assert_eq!(parsed.sequence_number, 11);
-        assert_eq!(parsed.auth_tag, [0xAA; 32]);
+        assert_eq!(parsed.auth_tag, [0xAA; AUTH_TAG_SIZE]);
     }
 
     #[test]

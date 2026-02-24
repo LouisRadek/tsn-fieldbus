@@ -35,7 +35,7 @@ use pnet::util::MacAddr;
 use std::io::{self, Cursor};
 
 use crate::security::auth_footer::{
-    SECURITY_FOOTER_SIZE, SecurityFooter, split_payload_and_footer,
+    AUTH_TAG_SIZE, SECURITY_FOOTER_SIZE, SecurityFooter, split_payload_and_footer,
 };
 use crate::slave_api::StatusCode;
 
@@ -134,7 +134,7 @@ pub struct ParsedL2Frame<'a> {
     pub header: L2Header,
     pub payload: &'a [u8],
     pub sequence_number: u64,
-    pub auth_tag: [u8; 32],
+    pub auth_tag: [u8; AUTH_TAG_SIZE],
 }
 
 pub fn build_l2_frame(
@@ -279,7 +279,7 @@ mod tests {
         let vlan_id_pcp = 0x1234;
         let footer = SecurityFooter {
             sequence_number: 1,
-            auth_tag: [0xAA; 32],
+            auth_tag: [0xAA; AUTH_TAG_SIZE],
         };
         let frame = build_l2_frame(source, destination, vlan_id_pcp, &header, &payload, &footer);
 
@@ -308,7 +308,7 @@ mod tests {
         frame.extend_from_slice(&payload);
         SecurityFooter {
             sequence_number: 9,
-            auth_tag: [0x55; 32],
+            auth_tag: [0x55; AUTH_TAG_SIZE],
         }
         .write_to(&mut frame);
 
@@ -319,6 +319,6 @@ mod tests {
         assert_eq!(parsed.header, header);
         assert_eq!(parsed.payload, payload.as_slice());
         assert_eq!(parsed.sequence_number, 9);
-        assert_eq!(parsed.auth_tag, [0x55; 32]);
+        assert_eq!(parsed.auth_tag, [0x55; AUTH_TAG_SIZE]);
     }
 }

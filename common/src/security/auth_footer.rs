@@ -2,7 +2,7 @@
 
 use crate::slave_api::StatusCode;
 
-pub const AUTH_TAG_SIZE: usize = 32;
+pub const AUTH_TAG_SIZE: usize = 8;
 pub const SECURITY_FOOTER_SIZE: usize = 8 + AUTH_TAG_SIZE;
 
 /// Authentication footer appended to protocol payloads.
@@ -19,7 +19,7 @@ impl SecurityFooter {
         output.extend_from_slice(&self.auth_tag);
     }
 
-    /// Parse a footer from an exact 40-byte input slice.
+    /// Parse a footer from an exact security-footer-sized input slice.
     pub fn read_from(input: &[u8]) -> Result<Self, StatusCode> {
         if input.len() != SECURITY_FOOTER_SIZE {
             return Err(StatusCode::ErrInvalidLen);

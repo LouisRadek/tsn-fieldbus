@@ -4,6 +4,7 @@
 //! with per-stream sequence state used by L2 authentication.
 
 use crate::l2_types::L2Header;
+use crate::security::auth_footer::AUTH_TAG_SIZE;
 use crate::security::crypto::{calculate_hmac, verify_hmac};
 use crate::security::shared_secret::load_shared_secret_from_env;
 use crate::slave_api::{Direction, StatusCode, StreamConfig};
@@ -142,7 +143,7 @@ impl StreamStore {
         &self,
         header: &L2Header,
         payload: &[u8],
-    ) -> Result<(u64, [u8; 32]), StatusCode> {
+    ) -> Result<(u64, [u8; AUTH_TAG_SIZE]), StatusCode> {
         let stream_id = { header.stream_id };
         let mut stream_guard = self
             .streams
@@ -171,7 +172,7 @@ impl StreamStore {
         header: &L2Header,
         payload: &[u8],
         received_sequence_number: u64,
-        received_auth_tag: &[u8; 32],
+        received_auth_tag: &[u8; AUTH_TAG_SIZE],
     ) -> Result<bool, StatusCode> {
         let stream_id = { header.stream_id };
         let mut stream_guard = self

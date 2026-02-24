@@ -1,6 +1,7 @@
 //! Discovery protocol authentication handler.
 
 use crate::discovery_types::SdcpHeader;
+use crate::security::auth_footer::AUTH_TAG_SIZE;
 use crate::security::crypto::{calculate_hmac, verify_hmac};
 use pnet::util::MacAddr;
 use std::collections::HashMap;
@@ -76,7 +77,7 @@ impl DiscoveryAuthHandler {
         device_mac: MacAddr,
         header: &SdcpHeader,
         payload: &[u8],
-    ) -> Option<(u64, [u8; 32])> {
+    ) -> Option<(u64, [u8; AUTH_TAG_SIZE])> {
         let mut devices = self
             .devices
             .write()
@@ -102,7 +103,7 @@ impl DiscoveryAuthHandler {
         header: &SdcpHeader,
         payload: &[u8],
         received_sequence_number: u64,
-        auth_tag: &[u8; 32],
+        auth_tag: &[u8; AUTH_TAG_SIZE],
     ) -> bool {
         let mut devices = self
             .devices
@@ -140,7 +141,7 @@ impl DiscoveryAuthHandler {
         header: &SdcpHeader,
         payload: &[u8],
         sequence_number: u64,
-        auth_tag: &[u8; 32],
+        auth_tag: &[u8; AUTH_TAG_SIZE],
     ) -> bool {
         if sequence_number != 1 {
             return false;
